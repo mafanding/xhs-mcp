@@ -1,0 +1,541 @@
+"""Browser Manager for XHS Operations.
+
+Backed by CloakBrowser, which hands back ordinary Playwright objects driven by a
+stealth-patched Chromium binary.
+
+Two differences from the Puppeteer original are worth knowing about:
+
+``browser_path``
+    CloakBrowser always launches its own patched binary — ``executable_path`` is
+    set internally and is not a parameter of any ``launch_*`` function. The
+    ``browser_path`` / ``-b`` / ``executablePath`` argument is therefore accepted
+    everywhere it was accepted before, for interface compatibility, but has no
+    effect. Pointing this at a stock Chrome would defeat the stealth patches
+    that motivate using CloakBrowser at all.
+
+Chromium flags
+    The original passed a Puppeteer hardening set (``--disable-gpu``,
+    ``--no-sandbox``, ``--no-zygote``, …). Several of those are bot tells that
+    would undo CloakBrowser's fingerprint work, so the stealth defaults are used
+    instead. Set ``XHS_BROWSER_ARGS`` (comma-separated) to append flags — e.g.
+    ``--no-sandbox`` when running as root in a container.
+"""
+
+from __future__ import annotations
+
+import os
+from typing import Any
+
+from cloakbrowser import launch_context_async, launch_persistent_context_async
+from playwright.async_api import BrowserContext, Page
+from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+
+from ...shared.config import get_config
+from ...shared.cookies import load_cookies, save_cookies
+from ...shared.errors import BrowserLaunchError, BrowserNavigationError, XHSError
+from ...shared.logger import logger
+from ...shared.profile import ensure_user_data_dir
+from ...shared.types import Config, Cookie
+from ...shared.utils import sleep
+from .browser_pool_service import BrowserPoolService
+from .browser_types import BrowserPoolOptions, ManagedBrowser
+
+# Keys Playwright's add_cookies() accepts. A cookie file written by the
+# Puppeteer version also carries size/session/sourceScheme/partitionKey, which
+# Playwright rejects outright, so anything outside this set is dropped on load.
+_PLAYWRIGHT_COOKIE_KEYS = (
+    "name",
+    "value",
+    "domain",
+    "path",
+    "expires",
+    "httpOnly",
+    "secure",
+    "sameSite",
+)
+
+_VALID_SAME_SITE = ("Strict", "Lax", "None")
+
+WaitUntil = str
+
+# Puppeteer's networkidle0/networkidle2 both collapse to Playwright's networkidle.
+_WAIT_UNTIL_MAP = {
+    "load": "load",
+    "domcontentloaded": "domcontentloaded",
+    "networkidle0": "networkidle",
+    "networkidle2": "networkidle",
+    "networkidle": "networkidle",
+    "commit": "commit",
+}
+
+
+def _extra_browser_args() -> list[str]:
+    raw = os.environ.get("XHS_BROWSER_ARGS", "").strip()
+    if not raw:
+        return []
+    return [arg.strip() for arg in raw.split(",") if arg.strip()]
+
+
+def _launch_error_message(error: BaseException, user_data_dir: str | None) -> str:
+    """Turn a raw launch failure into something actionable.
+
+    Chrome refuses to open a profile directory that another Chrome already has
+    open, which is the most likely failure once profile mode is enabled.
+    """
+    text = str(error)
+
+    if user_data_dir and (
+        "ProcessSingleton" in text
+        or "SingletonLock" in text
+        or "profile appears to be in use" in text.lower()
+        or "already running" in text.lower()
+    ):
+        return (
+            f"Failed to launch browser: the profile directory {user_data_dir} is "
+            f"already in use by another browser process. A Chromium profile can "
+            f"only be opened once at a time — close the other xhs-mcp process, or "
+            f"give each concurrent process its own XHS_USER_DATA_DIR. "
+            f"Original error: {error}"
+        )
+
+    return f"Failed to launch browser: {error}"
+
+
+def to_playwright_cookies(cookies: list[Cookie]) -> list[dict[str, Any]]:
+    """Filter stored cookies down to the keys Playwright accepts."""
+    result: list[dict[str, Any]] = []
+
+    for cookie in cookies:
+        converted = {
+            key: cookie[key]  # type: ignore[literal-required]
+            for key in _PLAYWRIGHT_COOKIE_KEYS
+            if cookie.get(key) is not None  # type: ignore[union-attr]
+        }
+
+        same_site = converted.get("sameSite")
+        if same_site not in _VALID_SAME_SITE:
+            converted.pop("sameSite", None)
+
+        if converted.get("name") is None or converted.get("value") is None:
+            continue
+
+        if not converted.get("domain") or not converted.get("path"):
+            continue
+
+        result.append(converted)
+
+    return result
+
+
+class BrowserManager:
+    """Owns the browser context, page lifecycle, navigation and cookie plumbing."""
+
+    def __init__(
+        self,
+        config: Config | None = None,
+        use_pool: bool = False,
+        pool_options: BrowserPoolOptions | None = None,
+    ) -> None:
+        self.config = config or get_config()
+        self._context: BrowserContext | None = None
+        self._browser_pool: BrowserPoolService | None = None
+        self._use_pool = use_pool
+        self._pool_options = pool_options
+        self._tracked_pages: set[Page] = set()
+        self._max_tracked_pages = 10
+        # A persistent context opens with one page already attached; reuse it
+        # for the first create_page() so headed runs show a single window.
+        self._pending_initial_page: Page | None = None
+
+        if self._use_pool:
+            self._browser_pool = BrowserPoolService(self.config, pool_options)
+
+    # ------------------------------------------------------------------
+    # Page lifecycle
+    # ------------------------------------------------------------------
+
+    async def create_page(
+        self,
+        headless: bool | None = None,
+        executable_path: str | None = None,
+        should_load_cookies: bool = True,
+    ) -> Page:
+        """Create a page, launching the browser on first use.
+
+        The browser is cached, so — exactly as in the original — the ``headless``
+        value of the *first* call decides the mode for this manager's whole
+        lifetime; later calls reuse the existing browser and ignore their own
+        ``headless`` argument.
+        """
+        try:
+            if self._use_pool and self._browser_pool:
+                return await self._create_page_from_pool(should_load_cookies)
+
+            if self._context is None:
+                self._context = await self._launch_context(headless, executable_path)
+
+            page = self._take_initial_page() or await self._context.new_page()
+
+            self._tracked_pages.add(page)
+            page.once("close", lambda _: self._tracked_pages.discard(page))
+
+            # Leak detection: something is not closing its pages.
+            if len(self._tracked_pages) > self._max_tracked_pages:
+                logger.warn(
+                    f"Tracked pages ({len(self._tracked_pages)}) exceeds threshold "
+                    f"({self._max_tracked_pages}), forcing cleanup"
+                )
+                await self.close_all_pages()
+
+            page.set_default_timeout(self.config.browser.default_timeout)
+            page.set_default_navigation_timeout(self.config.browser.navigation_timeout)
+
+            if should_load_cookies:
+                await self._load_cookies_into_context(page.context)
+
+            return page
+        except XHSError:
+            raise
+        except Exception as error:
+            logger.error(f"Browser page creation error: {error}")
+            raise self._handle_browser_error(error, "create_page") from error
+
+    async def _create_page_from_pool(self, should_load_cookies: bool = True) -> Page:
+        if self._browser_pool is None:
+            raise XHSError("Browser pool not initialized", "BrowserPoolError")
+
+        managed_browser = await self._browser_pool.acquire_browser()
+
+        try:
+            page = await managed_browser.context.new_page()
+
+            page.set_default_timeout(self.config.browser.default_timeout)
+            page.set_default_navigation_timeout(self.config.browser.navigation_timeout)
+
+            if should_load_cookies:
+                await self._load_cookies_into_context(page.context)
+
+            released = False
+
+            def release_browser(_: Any = None) -> None:
+                nonlocal released
+                if released:
+                    return
+                released = True
+                import asyncio
+
+                asyncio.ensure_future(  # noqa: RUF006 - fire-and-forget release
+                    self._release_quietly(managed_browser)
+                )
+
+            page.once("close", release_browser)
+
+            return page
+        except Exception:
+            await self._release_quietly(managed_browser)
+            raise
+
+    async def _release_quietly(self, managed_browser: ManagedBrowser) -> None:
+        try:
+            if self._browser_pool is not None:
+                await self._browser_pool.release_browser(managed_browser)
+        except Exception as error:
+            logger.warn(f"Error releasing browser back to pool: {error}")
+
+    def _take_initial_page(self) -> Page | None:
+        """Hand out the persistent context's pre-opened page exactly once."""
+        page = self._pending_initial_page
+        self._pending_initial_page = None
+
+        if page is not None and not page.is_closed():
+            return page
+        return None
+
+    async def _launch_context(
+        self, headless: bool | None = None, executable_path: str | None = None
+    ) -> BrowserContext:
+        is_headless = (
+            headless if headless is not None else self.config.browser.headless_default
+        )
+
+        if executable_path:
+            logger.warn(
+                "browser_path is accepted for compatibility but ignored: CloakBrowser "
+                "always launches its own stealth-patched Chromium "
+                f"(requested: {executable_path})"
+            )
+
+        if self.config.browser.slowmo:
+            logger.warn(
+                "browser.slowmo is not applied: CloakBrowser's context launcher does "
+                "not forward Playwright launch options"
+            )
+
+        user_data_dir = self.config.paths.user_data_dir
+        args = _extra_browser_args() or None
+
+        try:
+            if user_data_dir:
+                ensure_user_data_dir(user_data_dir)
+                logger.debug(f"Launching with persistent profile: {user_data_dir}")
+                context = await launch_persistent_context_async(
+                    user_data_dir=user_data_dir,
+                    headless=is_headless,
+                    args=args,
+                )
+                # Chrome opens a blank page with the profile; keep it for the
+                # first create_page() instead of leaving a stray window around.
+                self._pending_initial_page = context.pages[0] if context.pages else None
+                return context
+
+            return await launch_context_async(headless=is_headless, args=args)
+        except Exception as error:
+            logger.error(f"Failed to launch browser: {error}")
+            raise BrowserLaunchError(
+                _launch_error_message(error, user_data_dir),
+                {
+                    "headless": is_headless,
+                    "executablePath": executable_path,
+                    "userDataDir": user_data_dir,
+                },
+                error,
+            ) from error
+
+    # ------------------------------------------------------------------
+    # Cookies
+    # ------------------------------------------------------------------
+
+    async def _load_cookies_into_context(self, context: BrowserContext) -> bool:
+        """Seed the context from ``cookies.json``.
+
+        In profile mode the directory is the source of truth once it holds a
+        session, so the file is only used to seed a *fresh* profile. That both
+        migrates an existing cookie-file login into a new profile and avoids
+        overwriting cookies the browser has since refreshed — services like
+        ``feeds`` and ``status`` read cookies without writing them back, so the
+        file can legitimately lag behind the profile.
+        """
+        try:
+            if self.config.paths.user_data_dir and await context.cookies():
+                logger.debug(
+                    "Persistent profile already holds cookies; skipping cookies.json seed"
+                )
+                return False
+
+            cookies = load_cookies()
+
+            if not cookies:
+                return False
+
+            playwright_cookies = to_playwright_cookies(cookies)
+            if not playwright_cookies:
+                return False
+
+            await context.add_cookies(playwright_cookies)
+            return True
+        except Exception as error:
+            logger.warn(f"Failed to load cookies: {error}")
+            return False
+
+    async def save_cookies_from_page(self, page: Page) -> None:
+        """Persist the page's context cookies to the cookie file."""
+        try:
+            cookies = await page.context.cookies()
+
+            app_cookies: list[Cookie] = [
+                {
+                    "name": cookie.get("name"),
+                    "value": cookie.get("value"),
+                    "domain": cookie.get("domain"),
+                    "path": cookie.get("path"),
+                    "expires": cookie.get("expires"),
+                    "httpOnly": cookie.get("httpOnly"),
+                    "secure": cookie.get("secure"),
+                    "sameSite": cookie.get("sameSite"),
+                }  # type: ignore[typeddict-item]
+                for cookie in cookies
+            ]
+
+            save_cookies(app_cookies)
+        except Exception as error:
+            logger.error(f"Failed to save cookies: {error}")
+            raise self._handle_browser_error(error, "save_cookies") from error
+
+    # ------------------------------------------------------------------
+    # Navigation and waiting
+    # ------------------------------------------------------------------
+
+    async def navigate_with_retry(
+        self,
+        page: Page,
+        url: str,
+        wait_until: WaitUntil = "load",
+        max_retries: int | None = None,
+    ) -> None:
+        """Navigate to ``url``, retrying only on navigation timeouts."""
+        retries = max_retries if max_retries is not None else self.config.xhs.max_retries
+        resolved_wait_until = _WAIT_UNTIL_MAP.get(wait_until, "load")
+
+        for attempt in range(retries + 1):
+            try:
+                await page.goto(
+                    url,
+                    wait_until=resolved_wait_until,  # type: ignore[arg-type]
+                    timeout=self.config.browser.navigation_timeout,
+                )
+                return
+            except PlaywrightTimeoutError as error:
+                if attempt == retries:
+                    raise BrowserNavigationError(
+                        f"Failed to navigate to {url} after {retries + 1} attempts",
+                        {"url": url, "attempts": attempt + 1},
+                        error,
+                    ) from error
+
+                await sleep(self.config.xhs.retry_delay * 1000)
+
+    async def try_wait_for_selector(
+        self,
+        page: Page,
+        selector: str,
+        timeout: int | None = None,
+        visible: bool = True,
+    ) -> bool:
+        """Wait for a selector, returning False on timeout instead of raising."""
+        try:
+            await page.wait_for_selector(
+                selector,
+                timeout=timeout or self.config.browser.default_timeout,
+                # Puppeteer's `visible: false` means "present in the DOM", not
+                # "hidden" — Playwright spells that "attached".
+                state="visible" if visible else "attached",
+            )
+            return True
+        except PlaywrightTimeoutError:
+            return False
+
+    async def wait_for_selector_visible(
+        self, page: Page, selector: str, timeout: int | None = None
+    ) -> bool:
+        return await self.try_wait_for_selector(page, selector, timeout, True)
+
+    async def wait_for_selector_hidden(
+        self, page: Page, selector: str, timeout: int | None = None
+    ) -> bool:
+        return await self.try_wait_for_selector(page, selector, timeout, False)
+
+    # ------------------------------------------------------------------
+    # Teardown
+    # ------------------------------------------------------------------
+
+    async def cleanup(self) -> None:
+        if self._use_pool and self._browser_pool:
+            try:
+                await self._browser_pool.cleanup()
+            except Exception as error:
+                logger.warn(f"Error cleaning up browser pool: {error}")
+            finally:
+                self._browser_pool = None
+
+        await self.close_all_pages()
+
+        if self._context is not None:
+            try:
+                # CloakBrowser patches close() to also close the browser and stop
+                # its Playwright instance.
+                await self._context.close()
+            except Exception as error:
+                logger.warn(f"Error closing browser: {error}")
+            finally:
+                self._context = None
+
+    async def close_all_pages(self) -> None:
+        """Close every page this manager opened that is still open."""
+        for page in list(self._tracked_pages):
+            if not page.is_closed():
+                try:
+                    await page.close()
+                except Exception as error:
+                    logger.warn(f"Error closing tracked page: {error}")
+        self._tracked_pages.clear()
+
+    # ------------------------------------------------------------------
+    # Pool controls and diagnostics
+    # ------------------------------------------------------------------
+
+    def get_browser_pool_stats(self) -> Any:
+        if self._use_pool and self._browser_pool:
+            return self._browser_pool.get_pool_stats()
+        return None
+
+    def get_tracked_page_count(self) -> int:
+        return len(self._tracked_pages)
+
+    def enable_browser_pool(self) -> None:
+        if not self._use_pool:
+            self._use_pool = True
+            self._browser_pool = BrowserPoolService(self.config, self._pool_options)
+
+    async def disable_browser_pool(self) -> None:
+        if self._use_pool and self._browser_pool:
+            await self._browser_pool.cleanup()
+            self._browser_pool = None
+            self._use_pool = False
+
+    # ------------------------------------------------------------------
+    # Error mapping
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _handle_browser_error(error: BaseException, operation_name: str) -> XHSError:
+        context = {"operationName": operation_name}
+
+        if isinstance(error, PlaywrightTimeoutError):
+            if "login" in operation_name.lower():
+                return XHSError(
+                    f"Login operation timed out during {operation_name}",
+                    "LoginTimeoutError",
+                    context,
+                    error,
+                )
+            return XHSError(
+                f"Browser operation timed out: {operation_name}",
+                "BrowserError",
+                context,
+                error,
+            )
+
+        if "navigation" in str(error).lower():
+            return BrowserNavigationError(
+                f"Navigation failed during {operation_name}: {error}",
+                context,
+                error,
+            )
+
+        return XHSError(
+            f"Browser error during {operation_name}: {error}",
+            "BrowserError",
+            context,
+            error,
+        )
+
+
+_global_browser_manager: BrowserManager | None = None
+
+
+def get_browser_manager(use_pool: bool = False) -> BrowserManager:
+    global _global_browser_manager
+    if _global_browser_manager is None:
+        _global_browser_manager = BrowserManager(None, use_pool)
+    return _global_browser_manager
+
+
+def get_pooled_browser_manager() -> BrowserManager:
+    return get_browser_manager(True)
+
+
+async def cleanup_global_browser_manager() -> None:
+    global _global_browser_manager
+    if _global_browser_manager is not None:
+        await _global_browser_manager.cleanup()
+        _global_browser_manager = None

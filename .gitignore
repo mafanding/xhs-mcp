@@ -1,0 +1,16 @@
+# Node source kept locally as a porting reference; not part of the Python package
+_source_node/
+
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+temp_images/
+.DS_Store
+reports/

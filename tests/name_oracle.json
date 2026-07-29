@@ -1,0 +1,12 @@
+{
+ "https://example.com/a.jpg": "img_276a1ac00ba4f0ea.jpg",
+ "https://example.com/a.JPEG": "img_2104237cee055fbd.jpeg",
+ "http://x.io/p/b.png?q=1": "img_0d98512c4c949e03.png",
+ "https://e.com/no-ext": "img_6323a29229fd0787.jpg",
+ "https://e.com/img.webp#frag": "img_3f3b474942d9e5f6.webp",
+ "https://e.com/deep/path/c.BMP": "img_90bf4725b40684b5.bmp",
+ "https://e.com/x.gif": "img_c0cc5ed9bf13e78c.gif",
+ "https://e.com/y.jpeg": "img_e3a5a88548ade070.jpeg",
+ "https://e.com/a.jpg?v=2": "img_562dc1a52921e7b5.jpg",
+ "https://e.com/A.Png": "img_aaf3291078f0c743.png"
+}

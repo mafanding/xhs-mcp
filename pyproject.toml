@@ -1,0 +1,69 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "xhs-mcp"
+version = "0.8.13"
+description = "XiaoHongShu CLI and MCP Server (Python + CloakBrowser)"
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Algovate" }]
+requires-python = ">=3.10"
+keywords = [
+    "xiaohongshu",
+    "xhs",
+    "mcp",
+    "model-context-protocol",
+    "automation",
+    "cloakbrowser",
+    "playwright",
+    "cli",
+    "social-media",
+    "content-publishing",
+    "web-automation",
+    "python",
+]
+classifiers = [
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "mcp>=2.0.0",
+    "cloakbrowser>=0.5.0",
+    "playwright>=1.40",
+    "click>=8.1",
+    "httpx>=0.24",
+    "starlette>=0.37",
+    "uvicorn>=0.27",
+    "regex>=2023.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=7.0", "pytest-asyncio>=0.23", "ruff>=0.4"]
+
+[project.urls]
+Homepage = "https://github.com/algovate/xhs-mcp#readme"
+Repository = "https://github.com/algovate/xhs-mcp"
+Issues = "https://github.com/algovate/xhs-mcp/issues"
+
+[project.scripts]
+xhs-mcp = "xhs_mcp.cli.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/xhs_mcp"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+ignore = ["E501", "B008"]
