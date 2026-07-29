@@ -30,7 +30,9 @@ Chromium flags
 
 from __future__ import annotations
 
+import asyncio
 import os
+import time
 from typing import Any
 
 from cloakbrowser import launch_persistent_context_async
@@ -74,6 +76,10 @@ _WAIT_UNTIL_MAP = {
     "networkidle": "networkidle",
     "commit": "commit",
 }
+
+
+def _now_ms() -> float:
+    return time.time() * 1000
 
 
 def _extra_browser_args() -> list[str]:
@@ -148,11 +154,15 @@ class BrowserManager:
         self._browser_pool: BrowserPoolService | None = None
         self._use_pool = use_pool
         self._pool_options = pool_options
-        self._tracked_pages: set[Page] = set()
+        # Page -> creation time in ms. Concurrent operations each hold a tab, so
+        # leak detection has to tell a long-lived leak from legitimate traffic.
+        self._tracked_pages: dict[Page, float] = {}
         self._max_tracked_pages = 10
+        self._stale_page_age = 300_000  # 5 minutes
         # A persistent context opens with one page already attached; reuse it
         # for the first create_page() so headed runs show a single window.
         self._pending_initial_page: Page | None = None
+        self._launch_lock = asyncio.Lock()
 
         if self._use_pool:
             self._browser_pool = BrowserPoolService(self.config, pool_options)
@@ -179,20 +189,23 @@ class BrowserManager:
                 return await self._create_page_from_pool(should_load_cookies)
 
             if self._context is None:
-                self._context = await self._launch_context(headless, executable_path)
+                # Serialise the launch. Concurrent callers would otherwise each
+                # start a browser against the same profile directory, and all
+                # but one would fail on Chromium's ProcessSingleton lock.
+                async with self._launch_lock:
+                    if self._context is None:
+                        self._context = await self._launch_context(
+                            headless, executable_path
+                        )
 
             page = self._take_initial_page() or await self._context.new_page()
 
-            self._tracked_pages.add(page)
-            page.once("close", lambda _: self._tracked_pages.discard(page))
+            self._tracked_pages[page] = _now_ms()
+            page.once("close", lambda _: self._tracked_pages.pop(page, None))
 
             # Leak detection: something is not closing its pages.
             if len(self._tracked_pages) > self._max_tracked_pages:
-                logger.warn(
-                    f"Tracked pages ({len(self._tracked_pages)}) exceeds threshold "
-                    f"({self._max_tracked_pages}), forcing cleanup"
-                )
-                await self.close_all_pages()
+                await self._close_stale_pages()
 
             page.set_default_timeout(self.config.browser.default_timeout)
             page.set_default_navigation_timeout(self.config.browser.navigation_timeout)
@@ -229,8 +242,6 @@ class BrowserManager:
                 if released:
                     return
                 released = True
-                import asyncio
-
                 asyncio.ensure_future(  # noqa: RUF006 - fire-and-forget release
                     self._release_quietly(managed_browser)
                 )
@@ -432,15 +443,47 @@ class BrowserManager:
             finally:
                 self._context = None
 
+    async def _close_stale_pages(self) -> None:
+        """Reclaim pages that were opened long ago and never closed.
+
+        Only pages older than ``_stale_page_age`` are touched: with several
+        tabs driving operations at once, closing every tracked page would kill
+        work that is legitimately in flight.
+        """
+        cutoff = _now_ms() - self._stale_page_age
+        stale = [page for page, created in self._tracked_pages.items() if created < cutoff]
+
+        if not stale:
+            logger.warn(
+                f"Tracked pages ({len(self._tracked_pages)}) exceeds threshold "
+                f"({self._max_tracked_pages}), but none are stale yet - "
+                f"leaving concurrent work alone"
+            )
+            return
+
+        logger.warn(
+            f"Tracked pages ({len(self._tracked_pages)}) exceeds threshold "
+            f"({self._max_tracked_pages}), closing {len(stale)} stale page(s)"
+        )
+
+        for page in stale:
+            await self._close_page_quietly(page)
+            self._tracked_pages.pop(page, None)
+
     async def close_all_pages(self) -> None:
         """Close every page this manager opened that is still open."""
         for page in list(self._tracked_pages):
-            if not page.is_closed():
-                try:
-                    await page.close()
-                except Exception as error:
-                    logger.warn(f"Error closing tracked page: {error}")
+            await self._close_page_quietly(page)
         self._tracked_pages.clear()
+
+    @staticmethod
+    async def _close_page_quietly(page: Page) -> None:
+        if page.is_closed():
+            return
+        try:
+            await page.close()
+        except Exception as error:
+            logger.warn(f"Error closing tracked page: {error}")
 
     # ------------------------------------------------------------------
     # Pool controls and diagnostics

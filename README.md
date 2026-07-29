@@ -227,7 +227,8 @@ xhs-mcp status     # 之后直接复用，无需再扫
 说明：
 - **老用户无需重新登录**：首次运行时若检测到旧的 `cookies.json`，会自动导入 profile 并把该文件退休（不再写入、不会重复应用）。
 - `xhs-mcp logout` 删除整个 profile 目录。为防误删，**只会删除带 `.xhs-mcp-profile` 标记文件的目录**（该文件由本工具创建）；若你把 `XHS_USER_DATA_DIR` 指向了真实的 Chrome profile，logout 会拒绝删除并报错。
-- ⚠️ **同一个 profile 目录同一时刻只能被一个进程打开**（Chromium 限制）。若 MCP 服务常驻运行，再在终端跑 `xhs-mcp status` 会失败并提示原因；这种情况请给其中一个进程单独指定 `XHS_USER_DATA_DIR`。
+- **并发**：一个进程内可以开任意多个 tab 并行处理，无需多个 profile。MCP 服务就是这么工作的 —— 实测 3 个 tool call 同时下发全部成功，总耗时约等于最慢的那个而非累加。
+- ⚠️ 但**同一个 profile 目录同一时刻只能被一个进程打开**（Chromium 的 `ProcessSingleton` 限制）。所以并发要发生在**同一个进程内**；若 MCP 服务常驻运行，再在终端跑 `xhs-mcp status` 会失败并提示原因，此时给终端那次单独指定 `XHS_USER_DATA_DIR` 即可（但那份 profile 需要各自登录）。
 - profile 目录约 10-50 MB。
 - `xhs://cookies` 里的 `cookieCount` 读自磁盘上的 Chromium cookie 库；浏览器运行期间该值可能偏低（Chromium 在内存中缓冲、定期落盘），浏览器退出后即准确。此字段仅供参考，不影响任何行为。
 

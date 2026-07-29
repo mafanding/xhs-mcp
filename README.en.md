@@ -160,7 +160,8 @@ xhs-mcp status     # reuses the profile, no re-scan
 Notes:
 - **Existing installs do not need to log in again**: a legacy `cookies.json` is imported into the profile on first run and then retired — nothing is ever written back to it.
 - `xhs-mcp logout` deletes the whole profile directory, but **only when it carries the `.xhs-mcp-profile` marker** this tool writes. If you point `XHS_USER_DATA_DIR` at a real Chrome profile, logout refuses and tells you why.
-- ⚠️ **A profile directory can only be open in one process at a time** (a Chromium constraint). If the MCP server is running, a second `xhs-mcp status` in a terminal will fail with an explanatory error — give one of them its own `XHS_USER_DATA_DIR`.
+- **Concurrency**: one process can drive as many tabs in parallel as you like — no second profile needed. That is how the MCP server works: three tool calls issued at once all succeed, taking about as long as the slowest rather than their sum.
+- ⚠️ But **a profile directory can only be open in one process at a time** (Chromium's `ProcessSingleton`). Concurrency therefore has to happen *within* a process; if the MCP server is running, a second `xhs-mcp status` in a terminal fails with an explanatory error. Give that one its own `XHS_USER_DATA_DIR` (it will need its own login).
 - Expect the profile to be ~10-50 MB.
 - `cookieCount` in `xhs://cookies` is read from the on-disk Chromium cookie database. While a browser is running it can read low, because Chromium buffers cookies in memory and flushes periodically; it settles once the browser exits. Informational only.
 

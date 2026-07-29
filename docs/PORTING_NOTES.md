@@ -174,9 +174,18 @@ if self._context is None:
 | `xhs://status` 的 `cookies` | `{fileExists, cookieCount}` | `{profileExists, cookieCount}` |
 | `xhs://config` 的 `paths` | `{appDataDir, cookiesFile}` | `{appDataDir, userDataDir}` |
 | `logout` | 删除 cookies.json | 删除 profile 目录；删不掉时返回 `success: false`（谎报成功而实际仍登录更糟） |
-| 并发 | 多进程可共享同一份 cookies.json | **同一 profile 目录同时只能被一个进程打开**，失败时给出明确提示 |
+| 并发 | 多进程可共享同一份 cookies.json | **进程内**多 tab 并行（已实测 3 个 MCP tool call 同时执行全部成功）；**跨进程**则同一 profile 目录同时只能被一个进程打开，失败时给出明确提示 |
 | `BrowserPoolService` | 池中浏览器共享 cookie 文件 | 池中浏览器**不共享登录态**（一个 profile 只能被一个进程打开），首次取用时会打印警告 |
 
 **迁移**：`shared/cookies.py` 保留为**只读的一次性导入**。首次运行时若存在旧 `cookies.json`（且 profile 为空），会导入其中的 cookie 并删除该文件，老用户无需重新登录。任何代码路径都不再写入该文件。
 
 **安全设计**：由于 profile 路径来自用户配置，可能被指向真实的 Chrome profile，本工具在创建目录时写入 `.xhs-mcp-profile` 标记文件，**只有带此标记的目录才会被 logout 删除**，否则拒绝并说明原因。
+
+
+## 18. 并发相关的两处加固
+
+改用单一 profile 后，浏览器实例成了进程内的共享资源，因此补了两个此前不存在的问题：
+
+**冷启动竞态（实测复现）**：`create_page()` 原本是 `if self._context is None: launch()`，并发调用时每个协程都会各自启动一次浏览器，而同一个 profile 目录只能被打开一次 —— 实测 3 个并发冷启动**有 2 个失败**在 Chromium 的 `ProcessSingleton` 上。现已用 `asyncio.Lock` + 双重检查串行化启动。
+
+**泄漏检测误杀并发任务**：原实现在跟踪的 page 数超过 10 时会调用 `close_all_pages()` 关掉**全部** page。cookie 文件时代每条命令只开一个 page，不会触发；但多 tab 并发下这会直接杀掉其他正在进行的操作。现改为记录每个 page 的创建时间，只关闭**超过 5 分钟仍未关闭**的 page（真正的泄漏），并发中的新 page 不受影响；若没有陈旧 page，只记录一条警告。
