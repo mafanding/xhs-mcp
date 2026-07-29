@@ -38,23 +38,21 @@ def test_omit_none_preserves_falsy_non_none_values() -> None:
     }
 
 
-def test_cookies_info_omits_last_modified_when_file_absent(tmp_path, monkeypatch) -> None:
+def test_profile_info_omits_last_modified_when_absent(tmp_path) -> None:
     from dataclasses import replace
 
     from xhs_mcp.shared import config as config_module
-    from xhs_mcp.shared.cookies import get_cookies_info
+    from xhs_mcp.shared.profile import get_profile_info
 
     original = get_config()
     config_module.set_config(
         replace(
             original,
-            paths=replace(
-                original.paths, cookies_file=str(tmp_path / "cookies.json")
-            ),
+            paths=replace(original.paths, user_data_dir=str(tmp_path / "profile")),
         )
     )
     try:
-        assert "lastModified" not in get_cookies_info()
+        assert "lastModified" not in get_profile_info()
     finally:
         config_module.set_config(original)
 

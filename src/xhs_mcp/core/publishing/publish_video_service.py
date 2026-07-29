@@ -55,8 +55,6 @@ class VideoPublishService(PublishBaseService):
                     page, title, content, resolved_video_path, tags
                 )
 
-                await self.get_browser_manager().save_cookies_from_page(page)
-
                 return omit_none(
                     {
                         "success": True,

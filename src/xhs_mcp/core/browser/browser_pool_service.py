@@ -8,6 +8,12 @@ pooling on — every service builds a plain :class:`BrowserManager`. The pool is
 kept because it is part of the public surface (``BrowserPoolService``,
 ``get_browser_pool``, ``cleanup_browser_pool``) and callers may opt in with
 ``BrowserManager(config, use_pool=True)``.
+
+⚠️ Pooled browsers are **not** signed in. The login session lives in a single
+persistent Chromium profile, and a profile directory can only be opened by one
+browser process at a time, so a pool of browsers cannot share it. Pooled
+instances therefore run in isolated, non-persistent contexts and are only
+useful for work that needs no authentication.
 """
 
 from __future__ import annotations
@@ -45,6 +51,7 @@ class BrowserPoolService:
         self._cleanup_task: asyncio.Task[None] | None = None
         self._is_shutting_down = False
         self._monitoring_started = False
+        self._warned_about_session = False
 
     # ------------------------------------------------------------------
     # Acquire / release
@@ -54,6 +61,15 @@ class BrowserPoolService:
         """Take an available browser, growing the pool up to ``max_instances``."""
         if self._is_shutting_down:
             raise XHSError("Browser pool is shutting down", "BrowserPoolError")
+
+        if not self._warned_about_session:
+            self._warned_about_session = True
+            logger.warn(
+                "Browser pool instances are NOT signed in: the login session lives "
+                "in a single persistent Chromium profile, which only one browser "
+                "process can open at a time. Use BrowserManager without a pool for "
+                "anything that needs authentication."
+            )
 
         self._ensure_monitoring()
 

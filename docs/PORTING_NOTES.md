@@ -9,7 +9,7 @@
 | MCP 工具与资源 Schema | 与 TS 源码 `XHS_TOOL_SCHEMAS` / `XHS_RESOURCE_SCHEMAS` 做 JSON 结构对比 | **完全一致** |
 | 标题显示宽度算法 | 用真实 npm `string-width@8` 生成 57 条语料的宽度表（含 CJK/emoji/ZWJ/旗帜/组合符/全角/歧义宽度/ANSI） | 整串 57/57、逐码点 331/331 **全部一致** |
 | 图片缓存文件名 | 用原 Node 实现生成 hash 文件名表 | **完全一致**（缓存目录跨版本可复用） |
-| Cookies 文件格式 | `~/.xhs-mcp/cookies.json`，JSON 数组，同字段 | **可与 TS 版互换** |
+| Cookies 文件格式 | 已移除，见第 17 节 | 旧文件可自动迁移 |
 | 错误码序列化 | 见下文第 5 节 | **完全一致** |
 
 ## 1. `browser_path` 参数不再生效（重要）
@@ -154,16 +154,29 @@ if self._context is None:
 
 `scripts/cli_validation.py` 在把命令输出写入 HTML 报告时会做 HTML 转义；原 `scripts/cli-validation.js` 直接做字符串插值。报告内容来自本地 CLI 的输出，风险很低，但转义是无损的改进，故予以保留。
 
-## 17. 新增能力：持久化 profile 模式（原实现没有）
+## 17. 移除 cookie 文件模式，改用持久化浏览器 profile（**破坏性变更**）
 
-原实现只有 cookie 文件一种登录态保存方式。本版新增可选的 `XHS_USER_DATA_DIR`，启用后改用 `launch_persistent_context_async()`，把登录态放在真实的 Chromium 用户目录里。
+原实现把登录态存成 `~/.xhs-mcp/cookies.json`，每次运行开一个全新的、类似无痕的上下文，再把 cookie 注入进去。**该模式已完全移除**：真实用户的浏览器不会每次都是崭新的隐私窗口，这是很强的自动化特征，容易被风控识别。
 
-**默认不启用，不设该变量时行为与原实现完全一致**（包括 `xhs://config` 的 `paths` 仍只有 `appDataDir` / `cookiesFile` 两个键、`logout` 返回值不含 `profileCleared`）。
+现在登录态一律保存在真实的 Chromium 用户目录（默认 `~/.xhs-mcp/profile`，可用 `XHS_USER_DATA_DIR` 覆盖），由 `launch_persistent_context_async()` 驱动。
 
-实测依据（为什么需要两种模式并存）：
+实测依据：
+- 小红书的关键登录 cookie `web_session` 是**有效期 365 天的持久 cookie**，profile 足以保住登录态。
+- `unread` / `webBuild` 是**会话 cookie**，Chrome 正常退出即丢弃 —— 这类非关键 UI 状态由站点下次访问时重新下发，无影响。
 
-- 小红书的关键登录 cookie `web_session` 是**有效期 365 天的持久 cookie**，因此 profile 目录足以保住登录态。
-- 但 `unread` / `webBuild` 是**会话 cookie**，Chrome 正常退出即丢弃，profile 也留不住 —— 这类非关键 UI 状态由站点在下次访问时重新下发。
-- 因此 profile 模式下仍会继续写 `cookies.json`（保持 `xhs://cookies` 资源与跨版本互换可用），但**只在 profile 为空时**从文件回灌，避免用过期数据覆盖浏览器刷新过的 cookie。
+具体变化：
 
-安全设计：`logout` 需要删除 profile 目录（否则删掉 cookies.json 仍是登录状态）。由于该路径来自用户配置，可能被指向真实的 Chrome profile，因此本工具在创建目录时会写入 `.xhs-mcp-profile` 标记文件，**只有带此标记的目录才会被删除**，否则拒绝删除并在返回消息中说明。
+| 项 | 之前 | 现在 |
+| --- | --- | --- |
+| 登录态存储 | `~/.xhs-mcp/cookies.json` | `~/.xhs-mcp/profile/`（Chromium 用户目录） |
+| `save_cookies()` / `BrowserManager.save_cookies_from_page()` | 存在 | **已删除**（浏览器自行持久化） |
+| `xhs://cookies` 资源 | `{filePath, fileExists, cookieCount, lastModified}` | `{profileDir, profileExists, cookieCount, lastModified}`，cookieCount 从 profile 的 SQLite 库读取 |
+| `xhs://status` 的 `cookies` | `{fileExists, cookieCount}` | `{profileExists, cookieCount}` |
+| `xhs://config` 的 `paths` | `{appDataDir, cookiesFile}` | `{appDataDir, userDataDir}` |
+| `logout` | 删除 cookies.json | 删除 profile 目录；删不掉时返回 `success: false`（谎报成功而实际仍登录更糟） |
+| 并发 | 多进程可共享同一份 cookies.json | **同一 profile 目录同时只能被一个进程打开**，失败时给出明确提示 |
+| `BrowserPoolService` | 池中浏览器共享 cookie 文件 | 池中浏览器**不共享登录态**（一个 profile 只能被一个进程打开），首次取用时会打印警告 |
+
+**迁移**：`shared/cookies.py` 保留为**只读的一次性导入**。首次运行时若存在旧 `cookies.json`（且 profile 为空），会导入其中的 cookie 并删除该文件，老用户无需重新登录。任何代码路径都不再写入该文件。
+
+**安全设计**：由于 profile 路径来自用户配置，可能被指向真实的 Chrome profile，本工具在创建目录时写入 `.xhs-mcp-profile` 标记文件，**只有带此标记的目录才会被 logout 删除**，否则拒绝并说明原因。

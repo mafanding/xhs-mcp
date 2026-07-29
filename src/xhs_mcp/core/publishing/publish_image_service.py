@@ -127,8 +127,6 @@ class ImagePublishService(PublishBaseService):
 
                 note_id = await self.wait_for_publish_completion(page)
 
-                await self.get_browser_manager().save_cookies_from_page(page)
-
                 return omit_none(
                     {
                         "success": True,

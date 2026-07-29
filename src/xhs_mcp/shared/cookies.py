@@ -1,8 +1,15 @@
-"""Cookie management for XHS MCP Server.
+"""Legacy cookie-file support.
 
-The on-disk format is unchanged from the TypeScript implementation — a JSON
-array at ``~/.xhs-mcp/cookies.json`` — so a profile created by either version
-works with the other.
+Earlier versions (and the TypeScript implementation this was ported from) kept
+the session in a JSON array at ``~/.xhs-mcp/cookies.json`` and re-injected it
+into a fresh, incognito-like browser context on every run. That pattern is a
+strong automation signal — a real user's browser is never a brand-new private
+window each time — so the session now lives in a persistent Chromium profile
+instead (see :mod:`xhs_mcp.shared.profile`).
+
+What remains here is a **one-way import**: if an old cookie file is still
+present when a fresh profile starts up, it is read once to seed the profile so
+nobody has to log in again. Nothing is ever written back to it.
 """
 
 from __future__ import annotations
@@ -11,18 +18,21 @@ import json
 from pathlib import Path
 
 from .config import get_config
-from .errors import XHSError
 from .logger import logger
-from .types import Cookie, CookiesInfo
-from .utils import omit_none
+from .types import Cookie
 
 
 def get_cookies_file_path() -> str:
+    """Path of the legacy cookie file (read-only; kept for migration)."""
     return get_config().paths.cookies_file
 
 
+def has_legacy_cookies() -> bool:
+    return Path(get_cookies_file_path()).exists()
+
+
 def load_cookies() -> list[Cookie] | None:
-    """Load persisted cookies, or ``None`` when absent or unreadable."""
+    """Read the legacy cookie file, or ``None`` when absent or unreadable."""
     path = Path(get_cookies_file_path())
 
     if not path.exists():
@@ -38,31 +48,8 @@ def load_cookies() -> list[Cookie] | None:
         return None
 
 
-def save_cookies(cookies: list[Cookie]) -> None:
-    """Persist cookies, creating the parent directory as needed.
-
-    An empty list is a no-op: the original never overwrote a good cookie file
-    with an empty one.
-    """
-    if not cookies:
-        return
-
-    path = Path(get_cookies_file_path())
-
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(
-            json.dumps(cookies, ensure_ascii=False, indent=2),
-            encoding="utf-8",
-        )
-    except OSError as error:
-        logger.error(f"Failed to save cookies to {path}: {error}")
-        raise XHSError(
-            f"Failed to save cookies: {error}", "CookieSaveError", {}, error
-        ) from error
-
-
 def delete_cookies_file() -> bool:
+    """Remove the legacy cookie file. Absent is treated as success."""
     path = Path(get_cookies_file_path())
 
     if not path.exists():
@@ -74,24 +61,3 @@ def delete_cookies_file() -> bool:
     except OSError as error:
         logger.error(f"Failed to delete cookies file {path}: {error}")
         return False
-
-
-def get_cookies_info() -> CookiesInfo:
-    path = Path(get_cookies_file_path())
-    cookies = load_cookies()
-
-    last_modified: float | None = None
-    exists = path.exists()
-    if exists:
-        # Milliseconds since the epoch, matching JavaScript's Date#getTime().
-        last_modified = path.stat().st_mtime * 1000
-
-    return omit_none(
-        {
-            "filePath": str(path),
-            "fileExists": exists,
-            "cookieCount": len(cookies) if cookies else 0,
-            "lastModified": last_modified,
-        },
-        "lastModified",
-    )

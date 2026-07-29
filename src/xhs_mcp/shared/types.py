@@ -49,14 +49,16 @@ class LoggingConfig:
 @dataclass(frozen=True)
 class PathsConfig:
     app_data_dir: str
-    cookies_file: str
-    user_data_dir: str | None = None
-    """Persistent Chromium profile directory, or ``None`` for a fresh context per run.
+    user_data_dir: str = ""
+    """Persistent Chromium profile directory holding the login session.
 
-    Set via ``XHS_USER_DATA_DIR``. When present the browser keeps cookies,
-    localStorage and IndexedDB across runs instead of starting incognito-like
-    each time.
+    Defaults to ``~/.xhs-mcp/profile``; override with ``XHS_USER_DATA_DIR``.
+    The browser keeps cookies, localStorage and IndexedDB here across runs, so
+    it never presents itself as a brand-new private window.
     """
+
+    cookies_file: str = ""
+    """Legacy cookie file, read once to seed a fresh profile. Never written."""
 
 
 @dataclass(frozen=True)
@@ -82,7 +84,7 @@ class Config:
 
 
 class Cookie(TypedDict, total=False):
-    """HTTP cookie as persisted in ``~/.xhs-mcp/cookies.json``."""
+    """HTTP cookie, as read from a legacy ``cookies.json`` during migration."""
 
     name: str
     value: str

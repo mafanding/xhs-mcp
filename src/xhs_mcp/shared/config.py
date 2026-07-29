@@ -1,8 +1,10 @@
 """Configuration management for XHS MCP Server.
 
-Environment variables, defaults and the ``~/.xhs-mcp`` layout are kept identical
-to the TypeScript implementation so an existing installation's cookies and
-client configuration keep working unchanged.
+Environment variables, defaults and the ``~/.xhs-mcp`` layout follow the
+TypeScript implementation so existing client configuration keeps working. The
+one departure is where the session lives: a persistent browser profile at
+``~/.xhs-mcp/profile`` rather than a ``cookies.json`` file — see
+:mod:`xhs_mcp.shared.profile`.
 """
 
 from __future__ import annotations
@@ -111,7 +113,9 @@ class ConfigManager:
             app_data_dir=app_data_dir,
             cookies_file=cookies_file,
             user_data_dir=(
-                str(Path(raw_user_data_dir).expanduser()) if raw_user_data_dir else None
+                str(Path(raw_user_data_dir).expanduser())
+                if raw_user_data_dir
+                else str(Path(app_data_dir) / "profile")
             ),
         )
 
@@ -158,7 +162,7 @@ class ConfigManager:
             },
             "paths": {
                 "appDataDir": config.paths.app_data_dir,
-                "cookiesFile": config.paths.cookies_file,
+                "userDataDir": config.paths.user_data_dir,
             },
             "xhs": {
                 "homeUrl": config.xhs.home_url,
@@ -210,14 +214,7 @@ def config_to_json_dict(config: Config) -> dict[str, Any]:
         },
         "paths": {
             "appDataDir": config.paths.app_data_dir,
-            "cookiesFile": config.paths.cookies_file,
-            # Only present when profile mode is enabled, so the default payload
-            # stays byte-identical to the TypeScript server's.
-            **(
-                {"userDataDir": config.paths.user_data_dir}
-                if config.paths.user_data_dir
-                else {}
-            ),
+            "userDataDir": config.paths.user_data_dir,
         },
         "xhs": {
             "homeUrl": config.xhs.home_url,

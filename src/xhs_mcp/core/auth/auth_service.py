@@ -13,7 +13,7 @@ from ...shared.base_service import BaseService
 from ...shared.cookies import delete_cookies_file
 from ...shared.errors import LoginFailedError, LoginTimeoutError, XHSError
 from ...shared.logger import logger
-from ...shared.profile import clear_user_data_dir, is_profile_mode
+from ...shared.profile import clear_user_data_dir
 from ...shared.types import Config, LoginResult, StatusResult
 from ...shared.utils import omit_none, sleep
 from ...shared.xhs_utils import get_login_status_with_profile, is_logged_in
@@ -106,8 +106,6 @@ class AuthService(BaseService):
                                 },
                             ) from None
 
-                await self.get_browser_manager().save_cookies_from_page(page)
-
                 await sleep(1000)
                 login_status = await get_login_status_with_profile(page)
                 if login_status.get("isLoggedIn"):
@@ -146,40 +144,32 @@ class AuthService(BaseService):
             ) from error
 
     async def logout(self) -> LoginResult:
-        """Log out by deleting the stored cookie file (and browser profile).
+        """Log out by deleting the browser profile that holds the session.
 
-        In profile mode the session also lives in the Chromium user data
-        directory, so removing only ``cookies.json`` would leave the account
-        signed in. The profile is deleted too, unless it lacks the marker file
-        identifying it as ours — see :mod:`xhs_mcp.shared.profile`.
+        The profile is only removed when it carries the marker file identifying
+        it as ours, so a directory the user pointed ``XHS_USER_DATA_DIR`` at can
+        never be destroyed by accident — see :mod:`xhs_mcp.shared.profile`. Any
+        leftover legacy ``cookies.json`` is cleaned up too.
         """
         try:
-            success = delete_cookies_file()
+            delete_cookies_file()
             profile_cleared, profile_error = clear_user_data_dir()
 
-            if success:
-                message = "Logged out successfully (cookies deleted)"
-                if profile_cleared:
-                    message = "Logged out successfully (cookies and browser profile deleted)"
-                elif profile_error:
-                    message = f"{message}, but the browser profile was kept: {profile_error}"
-
-                return omit_none(
-                    {
-                        "success": True,
-                        "message": message,
-                        "status": "logged_out",
-                        "action": "logged_out",
-                        "profileCleared": profile_cleared if is_profile_mode() else None,
-                    },
-                    "profileCleared",
-                )
+            if profile_cleared:
+                return {
+                    "success": True,
+                    "message": "Logged out successfully (browser profile deleted)",
+                    "status": "logged_out",
+                    "action": "logged_out",
+                    "profileCleared": True,
+                }
 
             return {
                 "success": False,
-                "message": "Failed to delete cookies file",
+                "message": profile_error or "Failed to delete browser profile",
                 "status": "logged_out",
                 "action": "none",
+                "profileCleared": False,
             }
         except Exception as error:
             logger.error(f"Logout failed: {error}")

@@ -16,8 +16,11 @@ from __future__ import annotations
 
 import json
 import shutil
+import sqlite3
+import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Any
 
 from .config import get_config
 from .logger import logger
@@ -25,14 +28,12 @@ from .logger import logger
 MARKER_FILENAME = ".xhs-mcp-profile"
 """Marks a profile directory as created and owned by xhs-mcp."""
 
+_COOKIES_DB_RELATIVE = ("Default", "Cookies")
 
-def get_user_data_dir() -> str | None:
-    """Return the configured profile directory, or ``None`` in cookie-file mode."""
+
+def get_user_data_dir() -> str:
+    """Return the Chromium profile directory holding the session."""
     return get_config().paths.user_data_dir
-
-
-def is_profile_mode() -> bool:
-    return get_user_data_dir() is not None
 
 
 def ensure_user_data_dir(path: str) -> None:
@@ -68,6 +69,64 @@ def is_owned_profile(path: str) -> bool:
     return (Path(path) / MARKER_FILENAME).exists()
 
 
+def count_profile_cookies(path: str | None = None) -> int | None:
+    """Count cookies stored in the profile, or ``None`` if that isn't readable.
+
+    Chromium keeps them in a SQLite database that is locked while the browser
+    runs, so the file is copied before reading.
+
+    The figure reflects what is **on disk**. Chromium buffers cookies in memory
+    and flushes periodically, so while a browser is live this can read low (or
+    zero) even though the session is valid; it settles once the browser exits.
+    Informational only — nothing decides behaviour from it.
+    """
+    directory = Path(path or get_user_data_dir())
+    db_path = directory.joinpath(*_COOKIES_DB_RELATIVE)
+
+    if not db_path.exists():
+        return None
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            copy = Path(tmp) / "Cookies"
+            shutil.copy2(db_path, copy)
+            connection = sqlite3.connect(copy)
+            try:
+                return int(connection.execute("SELECT count(*) FROM cookies").fetchone()[0])
+            finally:
+                connection.close()
+    except (OSError, sqlite3.Error) as error:
+        logger.debug(f"Could not read profile cookie database: {error}")
+        return None
+
+
+def get_profile_info() -> dict[str, Any]:
+    """Describe the session store, for the ``xhs://cookies`` resource."""
+    path = get_user_data_dir()
+    directory = Path(path)
+    exists = directory.is_dir()
+
+    info: dict[str, Any] = {
+        "profileDir": path,
+        "profileExists": exists,
+        "cookieCount": 0,
+    }
+
+    if not exists:
+        return info
+
+    cookie_count = count_profile_cookies(path)
+    if cookie_count is not None:
+        info["cookieCount"] = cookie_count
+
+    db_path = directory.joinpath(*_COOKIES_DB_RELATIVE)
+    if db_path.exists():
+        # Milliseconds since the epoch, matching JavaScript's Date#getTime().
+        info["lastModified"] = db_path.stat().st_mtime * 1000
+
+    return info
+
+
 def clear_user_data_dir() -> tuple[bool, str | None]:
     """Delete the profile directory during logout.
 
@@ -76,9 +135,6 @@ def clear_user_data_dir() -> tuple[bool, str | None]:
     real Chrome profile can never destroy it.
     """
     path = get_user_data_dir()
-
-    if path is None:
-        return False, None
 
     directory = Path(path)
     if not directory.exists():

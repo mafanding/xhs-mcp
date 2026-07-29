@@ -21,8 +21,8 @@ def default_config():
 
 def test_paths_default_to_home_xhs_mcp(default_config) -> None:
     assert default_config.paths.app_data_dir == str(Path.home() / ".xhs-mcp")
-    assert default_config.paths.cookies_file == str(
-        Path.home() / ".xhs-mcp" / "cookies.json"
+    assert default_config.paths.user_data_dir == str(
+        Path.home() / ".xhs-mcp" / "profile"
     )
 
 
@@ -104,7 +104,7 @@ def test_config_to_json_dict_uses_camel_case(default_config) -> None:
     assert set(payload) == {"browser", "server", "logging", "paths", "xhs"}
     assert "defaultTimeout" in payload["browser"]
     assert "headlessDefault" in payload["browser"]
-    assert "cookiesFile" in payload["paths"]
+    assert "userDataDir" in payload["paths"]
     assert "creatorVideoPublishUrl" in payload["xhs"]
     assert "loginOkSelector" in payload["xhs"]
 
@@ -119,6 +119,7 @@ def isolated_cookies(tmp_path: Path) -> Iterator[None]:
                 original.paths,
                 app_data_dir=str(tmp_path),
                 cookies_file=str(tmp_path / "cookies.json"),
+                user_data_dir=str(tmp_path / "profile"),
             ),
         )
     )
@@ -126,11 +127,13 @@ def isolated_cookies(tmp_path: Path) -> Iterator[None]:
     config_module.set_config(original)
 
 
-async def test_cookies_resource(isolated_cookies: None) -> None:
+async def test_cookies_resource_reports_the_profile(isolated_cookies: None) -> None:
+    """The session store is a profile directory, not a cookie file."""
     payload = json.loads(await ResourceHandlers().get_cookies_resource())
 
-    assert payload["fileExists"] is False
+    assert payload["profileExists"] is False
     assert payload["cookieCount"] == 0
+    assert payload["profileDir"].endswith("profile")
 
 
 async def test_config_resource_includes_framework_and_version() -> None:

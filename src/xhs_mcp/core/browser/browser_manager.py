@@ -3,7 +3,14 @@
 Backed by CloakBrowser, which hands back ordinary Playwright objects driven by a
 stealth-patched Chromium binary.
 
-Two differences from the Puppeteer original are worth knowing about:
+Three differences from the Puppeteer original are worth knowing about:
+
+Session storage
+    The original re-injected ``cookies.json`` into a fresh, incognito-like
+    context on every run — a strong automation signal, since a real user's
+    browser is never a brand-new private window. The session now lives in a
+    persistent Chromium profile that the browser maintains itself, so nothing
+    here saves cookies. A legacy cookie file is imported once and retired.
 
 ``browser_path``
     CloakBrowser always launches its own patched binary — ``executable_path`` is
@@ -26,12 +33,12 @@ from __future__ import annotations
 import os
 from typing import Any
 
-from cloakbrowser import launch_context_async, launch_persistent_context_async
+from cloakbrowser import launch_persistent_context_async
 from playwright.async_api import BrowserContext, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ...shared.config import get_config
-from ...shared.cookies import load_cookies, save_cookies
+from ...shared.cookies import delete_cookies_file, has_legacy_cookies, load_cookies
 from ...shared.errors import BrowserLaunchError, BrowserNavigationError, XHSError
 from ...shared.logger import logger
 from ...shared.profile import ensure_user_data_dir
@@ -191,7 +198,7 @@ class BrowserManager:
             page.set_default_navigation_timeout(self.config.browser.navigation_timeout)
 
             if should_load_cookies:
-                await self._load_cookies_into_context(page.context)
+                await self._migrate_legacy_cookies(page.context)
 
             return page
         except XHSError:
@@ -213,7 +220,7 @@ class BrowserManager:
             page.set_default_navigation_timeout(self.config.browser.navigation_timeout)
 
             if should_load_cookies:
-                await self._load_cookies_into_context(page.context)
+                await self._migrate_legacy_cookies(page.context)
 
             released = False
 
@@ -275,20 +282,17 @@ class BrowserManager:
         args = _extra_browser_args() or None
 
         try:
-            if user_data_dir:
-                ensure_user_data_dir(user_data_dir)
-                logger.debug(f"Launching with persistent profile: {user_data_dir}")
-                context = await launch_persistent_context_async(
-                    user_data_dir=user_data_dir,
-                    headless=is_headless,
-                    args=args,
-                )
-                # Chrome opens a blank page with the profile; keep it for the
-                # first create_page() instead of leaving a stray window around.
-                self._pending_initial_page = context.pages[0] if context.pages else None
-                return context
-
-            return await launch_context_async(headless=is_headless, args=args)
+            ensure_user_data_dir(user_data_dir)
+            logger.debug(f"Launching with persistent profile: {user_data_dir}")
+            context = await launch_persistent_context_async(
+                user_data_dir=user_data_dir,
+                headless=is_headless,
+                args=args,
+            )
+            # Chrome opens a blank page with the profile; keep it for the
+            # first create_page() instead of leaving a stray window around.
+            self._pending_initial_page = context.pages[0] if context.pages else None
+            return context
         except Exception as error:
             logger.error(f"Failed to launch browser: {error}")
             raise BrowserLaunchError(
@@ -305,25 +309,23 @@ class BrowserManager:
     # Cookies
     # ------------------------------------------------------------------
 
-    async def _load_cookies_into_context(self, context: BrowserContext) -> bool:
-        """Seed the context from ``cookies.json``.
+    async def _migrate_legacy_cookies(self, context: BrowserContext) -> bool:
+        """Seed a fresh profile from a legacy ``cookies.json``, once.
 
-        In profile mode the directory is the source of truth once it holds a
-        session, so the file is only used to seed a *fresh* profile. That both
-        migrates an existing cookie-file login into a new profile and avoids
-        overwriting cookies the browser has since refreshed — services like
-        ``feeds`` and ``status`` read cookies without writing them back, so the
-        file can legitimately lag behind the profile.
+        The profile is the session store; this only exists so an installation
+        that logged in under the old cookie-file scheme does not have to log in
+        again. A profile that already holds cookies is left alone, and the file
+        is retired after a successful import so it never gets re-applied.
         """
         try:
-            if self.config.paths.user_data_dir and await context.cookies():
-                logger.debug(
-                    "Persistent profile already holds cookies; skipping cookies.json seed"
-                )
+            if not has_legacy_cookies():
+                return False
+
+            if await context.cookies():
+                logger.debug("Profile already holds cookies; skipping legacy import")
                 return False
 
             cookies = load_cookies()
-
             if not cookies:
                 return False
 
@@ -332,34 +334,15 @@ class BrowserManager:
                 return False
 
             await context.add_cookies(playwright_cookies)
+            logger.info(
+                f"Imported {len(playwright_cookies)} cookies from the legacy "
+                f"cookies.json into the browser profile; the file is no longer used"
+            )
+            delete_cookies_file()
             return True
         except Exception as error:
-            logger.warn(f"Failed to load cookies: {error}")
+            logger.warn(f"Failed to import legacy cookies: {error}")
             return False
-
-    async def save_cookies_from_page(self, page: Page) -> None:
-        """Persist the page's context cookies to the cookie file."""
-        try:
-            cookies = await page.context.cookies()
-
-            app_cookies: list[Cookie] = [
-                {
-                    "name": cookie.get("name"),
-                    "value": cookie.get("value"),
-                    "domain": cookie.get("domain"),
-                    "path": cookie.get("path"),
-                    "expires": cookie.get("expires"),
-                    "httpOnly": cookie.get("httpOnly"),
-                    "secure": cookie.get("secure"),
-                    "sameSite": cookie.get("sameSite"),
-                }  # type: ignore[typeddict-item]
-                for cookie in cookies
-            ]
-
-            save_cookies(app_cookies)
-        except Exception as error:
-            logger.error(f"Failed to save cookies: {error}")
-            raise self._handle_browser_error(error, "save_cookies") from error
 
     # ------------------------------------------------------------------
     # Navigation and waiting

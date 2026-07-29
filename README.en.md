@@ -6,7 +6,9 @@
 
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-> This project is a rewrite of the original TypeScript + Puppeteer version and **preserves all of its functionality**: identical CLI subcommands and flags, identical MCP tool names and JSON Schemas, identical resource URIs, identical output JSON shapes, and an identical cookie file format (`~/.xhs-mcp/cookies.json`, interchangeable between versions).
+> This project is a rewrite of the original TypeScript + Puppeteer version and **preserves all of its functionality**: identical CLI subcommands and flags, identical MCP tool names and JSON Schemas, identical resource URIs and identical output JSON shapes.
+>
+> One deliberate difference: **the session is a persistent browser profile rather than `cookies.json`** — the original's inject-cookies-into-a-fresh-incognito-context pattern is a strong automation signal. Existing setups migrate automatically; see the [porting notes](./docs/PORTING_NOTES.md).
 
 ## 📦 Install
 
@@ -31,7 +33,7 @@ Requires Python >= 3.10.
   - Smart caching avoids re-downloading
 - Discovery: recommendations, search, detail, comments
 - User notes: list and delete
-- Automation: **CloakBrowser (source-level stealth-patched Chromium)**, headless mode, cookie management
+- Automation: **CloakBrowser (source-level stealth-patched Chromium)**, headless mode, **persistent browser profile for the session**
 - Validation: publishing validation script with HTML report
 
 ## 📋 Available Tools
@@ -142,35 +144,25 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 | `XHS_LOG_LEVEL` | `INFO` | Log level |
 | `XHS_LOG_FILE` | `false` | Write logs to a file |
 | `XHS_BROWSER_ARGS` | empty | Extra Chromium flags (comma-separated), e.g. `--no-sandbox` |
-| `XHS_USER_DATA_DIR` | empty | Set a directory to enable **persistent profile mode** (see below) |
+| `XHS_USER_DATA_DIR` | `~/.xhs-mcp/profile` | Browser profile directory holding the session (see below) |
 
-### 🔐 Two ways the session is kept
+### 🔐 The session lives in a persistent browser profile
 
-**Default (cookie file)**: every run starts a fresh, incognito-like browser; the session lives in `~/.xhs-mcp/cookies.json` and is injected back on the next run.
-
-**Persistent profile** (recommended — just set `XHS_USER_DATA_DIR`):
+Login state is kept in a real Chromium user data directory (`~/.xhs-mcp/profile` by default), so cookies, localStorage and IndexedDB are all managed by the browser itself:
 
 ```bash
-export XHS_USER_DATA_DIR=~/.xhs-mcp/profile
 xhs-mcp login      # scan the QR code once
 xhs-mcp status     # reuses the profile, no re-scan
 ```
 
-Uses a real Chromium user data directory, so cookies, localStorage and IndexedDB all persist.
-
-| | Cookie file (default) | Persistent profile |
-| --- | --- | --- |
-| Anti-detection | Fresh incognito-like context each run | **Looks more like a real user**; avoids incognito detection |
-| Persists | Cookies only | Cookies + localStorage + IndexedDB |
-| Size | A few KB | ~10-50 MB |
-| Interchangeable with the TS `cookies.json` | ✅ | ✅ (migrates from it on first launch) |
-| Concurrency | Shareable across processes | One process per directory |
+**Why not a cookie file**: earlier versions (and the TypeScript original this was ported from) stored the session in `~/.xhs-mcp/cookies.json` and injected it into a fresh incognito-like context on every run. A real user's browser is never a brand-new private window each time — that is a strong automation signal and an easy thing for risk control to flag. **That mode has been removed.**
 
 Notes:
-- On first use an existing `cookies.json` is imported into the new profile, so there is **no need to log in again**.
-- Once the profile holds cookies it becomes the source of truth; the file no longer overwrites it.
-- `xhs-mcp logout` deletes **both** the cookie file and the profile directory — but only if the directory carries the `.xhs-mcp-profile` marker this tool writes, so it can never destroy a real Chrome profile.
-- Give each concurrent process its own `XHS_USER_DATA_DIR`.
+- **Existing installs do not need to log in again**: a legacy `cookies.json` is imported into the profile on first run and then retired — nothing is ever written back to it.
+- `xhs-mcp logout` deletes the whole profile directory, but **only when it carries the `.xhs-mcp-profile` marker** this tool writes. If you point `XHS_USER_DATA_DIR` at a real Chrome profile, logout refuses and tells you why.
+- ⚠️ **A profile directory can only be open in one process at a time** (a Chromium constraint). If the MCP server is running, a second `xhs-mcp status` in a terminal will fail with an explanatory error — give one of them its own `XHS_USER_DATA_DIR`.
+- Expect the profile to be ~10-50 MB.
+- `cookieCount` in `xhs://cookies` is read from the on-disk Chromium cookie database. While a browser is running it can read low, because Chromium buffers cookies in memory and flushes periodically; it settles once the browser exits. Informational only.
 
 ## ⚠️ Notes
 

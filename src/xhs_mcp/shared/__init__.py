@@ -5,9 +5,8 @@ from .config import ConfigManager, config_to_json_dict, get_config, set_config
 from .cookies import (
     delete_cookies_file,
     get_cookies_file_path,
-    get_cookies_info,
+    has_legacy_cookies,
     load_cookies,
-    save_cookies,
 )
 from .errors import (
     AuthenticationError,
@@ -33,10 +32,11 @@ from .image_downloader import DownloadResult, ImageDownloader, get_image_downloa
 from .logger import Logger, logger
 from .profile import (
     clear_user_data_dir,
+    count_profile_cookies,
     ensure_user_data_dir,
+    get_profile_info,
     get_user_data_dir,
     is_owned_profile,
-    is_profile_mode,
 )
 from .string_width import string_width
 from .title_validator import (
@@ -113,6 +113,7 @@ __all__ = [
     "assert_title_width_valid",
     "calculate_remaining_title_width",
     "clear_user_data_dir",
+    "count_profile_cookies",
     "config_to_json_dict",
     "create_api_response",
     "create_mcp_error_response",
@@ -122,17 +123,17 @@ __all__ = [
     "extract_initial_state",
     "get_config",
     "get_cookies_file_path",
-    "get_cookies_info",
+    "get_profile_info",
     "get_image_downloader",
     "get_login_status_with_profile",
     "get_title_width",
+    "has_legacy_cookies",
     "get_user_data_dir",
     "get_title_width_breakdown",
     "is_array",
     "is_element_in_viewport",
     "is_number",
     "is_owned_profile",
-    "is_profile_mode",
     "is_string",
     "is_logged_in",
     "load_cookies",
@@ -142,7 +143,6 @@ __all__ = [
     "retry_with_backoff",
     "safe_error_handler",
     "safe_json_parse",
-    "save_cookies",
     "set_config",
     "sleep",
     "string_width",

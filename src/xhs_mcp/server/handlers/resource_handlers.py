@@ -7,7 +7,7 @@ from typing import Any
 
 from ...core.auth.auth_service import AuthService
 from ...shared.config import config_to_json_dict, get_config
-from ...shared.cookies import get_cookies_info
+from ...shared.profile import get_profile_info
 
 _FRAMEWORK = "MCP Python"
 
@@ -19,8 +19,13 @@ class ResourceHandlers:
         self.auth_service = AuthService(get_config())
 
     async def get_cookies_resource(self) -> str:
+        """Describe where the session lives.
+
+        The session is a persistent Chromium profile rather than a cookie file,
+        so this reports the profile directory and the cookie count read from it.
+        """
         try:
-            return json.dumps(get_cookies_info(), ensure_ascii=False, indent=2)
+            return json.dumps(get_profile_info(), ensure_ascii=False, indent=2)
         except Exception as error:
             return json.dumps({"error": str(error)}, ensure_ascii=False, indent=2)
 
@@ -43,7 +48,7 @@ class ResourceHandlers:
             except Exception as error:
                 auth_status = {"status": "error", "error": str(error)}
 
-            cookies_info = get_cookies_info()
+            profile_info = get_profile_info()
             config = get_config()
 
             status_data = {
@@ -55,8 +60,8 @@ class ResourceHandlers:
                 },
                 "authentication": auth_status,
                 "cookies": {
-                    "fileExists": cookies_info["fileExists"],
-                    "cookieCount": cookies_info["cookieCount"],
+                    "profileExists": profile_info["profileExists"],
+                    "cookieCount": profile_info["cookieCount"],
                 },
                 "capabilities": {
                     "toolsAvailable": 8,
