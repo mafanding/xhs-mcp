@@ -211,7 +211,29 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 | `XHS_LOG_LEVEL` | `INFO` | 日志级别 |
 | `XHS_LOG_FILE` | `false` | 是否写入日志文件 |
 | `XHS_BROWSER_ARGS` | 空 | 追加的 Chromium 参数（逗号分隔），如 `--no-sandbox` |
+| `XHS_SHARE_BROWSER` | `true` | 是否允许跨进程接管同一浏览器实例；设 `false` 则本进程独占
 | `XHS_USER_DATA_DIR` | `~/.xhs-mcp/profile` | 浏览器 profile 目录（登录态所在），见下 |
+
+### 🏗 架构：入口层 / 实例管理层 / 浏览器层
+
+```
+入口层        CLI  ·  MCP stdio  ·  MCP HTTP(SSE)
+                          │   （只发请求，不碰浏览器）
+实例管理层    BrowserSessionManager
+                          │   保证「一个 profile = 一个浏览器实例」
+浏览器层      BrowserManager → CloakBrowser + Playwright
+```
+
+入口层永远不自己启动浏览器，只向实例管理层要。管理层按 profile 目录归一：
+
+- **进程内**：同一 profile 复用同一实例（引用计数），多 tab 并行
+- **跨进程**：浏览器启动时 Chromium 会把调试端口写入 profile 目录的 `DevToolsActivePort`；后来的进程读到它就**接管已有实例**，而不是再启一个然后失败
+- **所有权**：谁启动谁负责关闭；接管方退出时只断开连接 —— 所以终端跑一条 `xhs-mcp status` 不会杀掉常驻 MCP 服务的浏览器
+- **启动竞态**：两个进程同时启动时，抢输的一方会自动改为接管赢家的实例
+
+因此不管入口怎么增减，这一层不用改；下面的浏览器层也可以假定自己是该 profile 唯一的实例。
+
+> 想让某个进程独占浏览器（不接管、不被接管），设 `XHS_SHARE_BROWSER=false`，并给它单独的 `XHS_USER_DATA_DIR`。
 
 ### 🔐 登录态：持久化浏览器 profile
 
@@ -227,8 +249,7 @@ xhs-mcp status     # 之后直接复用，无需再扫
 说明：
 - **老用户无需重新登录**：首次运行时若检测到旧的 `cookies.json`，会自动导入 profile 并把该文件退休（不再写入、不会重复应用）。
 - `xhs-mcp logout` 删除整个 profile 目录。为防误删，**只会删除带 `.xhs-mcp-profile` 标记文件的目录**（该文件由本工具创建）；若你把 `XHS_USER_DATA_DIR` 指向了真实的 Chrome profile，logout 会拒绝删除并报错。
-- **并发**：一个进程内可以开任意多个 tab 并行处理，无需多个 profile。MCP 服务就是这么工作的 —— 实测 3 个 tool call 同时下发全部成功，总耗时约等于最慢的那个而非累加。
-- ⚠️ 但**同一个 profile 目录同一时刻只能被一个进程打开**（Chromium 的 `ProcessSingleton` 限制）。所以并发要发生在**同一个进程内**；若 MCP 服务常驻运行，再在终端跑 `xhs-mcp status` 会失败并提示原因，此时给终端那次单独指定 `XHS_USER_DATA_DIR` 即可（但那份 profile 需要各自登录）。
+- **并发**：进程内多 tab 并行（实测 3 个 tool call 同时下发全部成功，总耗时约等于最慢的那个而非累加）；跨进程则由实例管理层接管同一实例，见上文架构。
 - profile 目录约 10-50 MB。
 - `xhs://cookies` 里的 `cookieCount` 读自磁盘上的 Chromium cookie 库；浏览器运行期间该值可能偏低（Chromium 在内存中缓冲、定期落盘），浏览器退出后即准确。此字段仅供参考，不影响任何行为。
 

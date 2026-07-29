@@ -189,3 +189,33 @@ if self._context is None:
 **冷启动竞态（实测复现）**：`create_page()` 原本是 `if self._context is None: launch()`，并发调用时每个协程都会各自启动一次浏览器，而同一个 profile 目录只能被打开一次 —— 实测 3 个并发冷启动**有 2 个失败**在 Chromium 的 `ProcessSingleton` 上。现已用 `asyncio.Lock` + 双重检查串行化启动。
 
 **泄漏检测误杀并发任务**：原实现在跟踪的 page 数超过 10 时会调用 `close_all_pages()` 关掉**全部** page。cookie 文件时代每条命令只开一个 page，不会触发；但多 tab 并发下这会直接杀掉其他正在进行的操作。现改为记录每个 page 的创建时间，只关闭**超过 5 分钟仍未关闭**的 page（真正的泄漏），并发中的新 page 不受影响；若没有陈旧 page，只记录一条警告。
+
+## 19. 引入实例管理层（架构变更）
+
+原实现里每个入口进程各自 `new BrowserManager()` 再各自启动浏览器 —— cookie 文件时代这只是浪费，改用单一 profile 后就成了硬冲突：**没有任何组件在维护「一个 profile 只有一个浏览器实例」这个不变量**。
+
+现在分三层：
+
+```
+入口层        CLI  ·  MCP stdio  ·  MCP HTTP(SSE)
+                          │   只发请求，不碰浏览器
+实例管理层    BrowserSessionManager   (core/browser/session_manager.py)
+                          │   保证「一个 profile = 一个浏览器实例」
+浏览器层      BrowserManager → CloakBrowser + Playwright
+```
+
+`BrowserManager` 不再自己调 `launch_*`，改为向管理层 `acquire(profile)`；`cleanup()` 改为 `release(profile)`。全仓库直接启动浏览器的地方只剩管理层本身（以及刻意绕开它的 `BrowserPoolService`，见第 11 节 —— 连接池天然与"单实例"矛盾）。
+
+管理层的职责：
+
+| 场景 | 行为 |
+| --- | --- |
+| 进程内同 profile 再次申请 | 复用同一实例，引用计数 +1 |
+| 跨进程且已有实例在跑 | 读 profile 目录下 Chromium 写的 `DevToolsActivePort`，探活后用 `connect_over_cdp()` **接管**，不再启第二个 |
+| 端口文件是崩溃残留 | 探活失败 → 忽略，正常启动 |
+| 两进程同时启动（竞态） | 抢输的一方收到 `ProcessSingleton` 错误后自动改为接管赢家 |
+| 释放（最后一个引用） | 启动方 `context.close()` 关掉浏览器；**接管方只断开 CDP 连接**，不影响持有者 |
+
+因此常驻 MCP 服务运行时，终端再跑 `xhs-mcp status` 会自动接管同一实例（实测通过），且该命令退出**不会**杀掉服务的浏览器（实测通过）。
+
+**为实现跨进程接管，启动参数增加了 `--remote-debugging-port=0`**（端口由系统分配，仅监听 127.0.0.1）。已实测对比开启前后的指纹（`navigator.webdriver` / `plugins` / `window.chrome` / UA / WebGL vendor 等）**完全一致**——Playwright 本来就通过 CDP 驱动浏览器，多暴露一个本地端口不改变页面内可见的信号。若仍希望关闭，设 `XHS_SHARE_BROWSER=false`（该进程独占，不接管也不被接管）。

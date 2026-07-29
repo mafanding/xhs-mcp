@@ -3,6 +3,11 @@
 Backed by CloakBrowser, which hands back ordinary Playwright objects driven by a
 stealth-patched Chromium binary.
 
+This is the *browser layer*: pages, navigation, waiting, cookies. It never
+launches a browser itself — :mod:`xhs_mcp.core.browser.session_manager` owns
+that, so the "one profile, one browser instance" invariant holds no matter
+which entry point is driving.
+
 Three differences from the Puppeteer original are worth knowing about:
 
 Session storage
@@ -35,19 +40,18 @@ import os
 import time
 from typing import Any
 
-from cloakbrowser import launch_persistent_context_async
 from playwright.async_api import BrowserContext, Page
 from playwright.async_api import TimeoutError as PlaywrightTimeoutError
 
 from ...shared.config import get_config
 from ...shared.cookies import delete_cookies_file, has_legacy_cookies, load_cookies
-from ...shared.errors import BrowserLaunchError, BrowserNavigationError, XHSError
+from ...shared.errors import BrowserNavigationError, XHSError
 from ...shared.logger import logger
-from ...shared.profile import ensure_user_data_dir
 from ...shared.types import Config, Cookie
 from ...shared.utils import sleep
 from .browser_pool_service import BrowserPoolService
 from .browser_types import BrowserPoolOptions, ManagedBrowser
+from .session_manager import BrowserSession, get_session_manager
 
 # Keys Playwright's add_cookies() accepts. A cookie file written by the
 # Puppeteer version also carries size/session/sourceScheme/partitionKey, which
@@ -89,31 +93,6 @@ def _extra_browser_args() -> list[str]:
     return [arg.strip() for arg in raw.split(",") if arg.strip()]
 
 
-def _launch_error_message(error: BaseException, user_data_dir: str | None) -> str:
-    """Turn a raw launch failure into something actionable.
-
-    Chrome refuses to open a profile directory that another Chrome already has
-    open, which is the most likely failure once profile mode is enabled.
-    """
-    text = str(error)
-
-    if user_data_dir and (
-        "ProcessSingleton" in text
-        or "SingletonLock" in text
-        or "profile appears to be in use" in text.lower()
-        or "already running" in text.lower()
-    ):
-        return (
-            f"Failed to launch browser: the profile directory {user_data_dir} is "
-            f"already in use by another browser process. A Chromium profile can "
-            f"only be opened once at a time — close the other xhs-mcp process, or "
-            f"give each concurrent process its own XHS_USER_DATA_DIR. "
-            f"Original error: {error}"
-        )
-
-    return f"Failed to launch browser: {error}"
-
-
 def to_playwright_cookies(cookies: list[Cookie]) -> list[dict[str, Any]]:
     """Filter stored cookies down to the keys Playwright accepts."""
     result: list[dict[str, Any]] = []
@@ -150,6 +129,7 @@ class BrowserManager:
         pool_options: BrowserPoolOptions | None = None,
     ) -> None:
         self.config = config or get_config()
+        self._session: BrowserSession | None = None
         self._context: BrowserContext | None = None
         self._browser_pool: BrowserPoolService | None = None
         self._use_pool = use_pool
@@ -272,6 +252,7 @@ class BrowserManager:
     async def _launch_context(
         self, headless: bool | None = None, executable_path: str | None = None
     ) -> BrowserContext:
+        """Ask the instance manager for this profile's browser."""
         is_headless = (
             headless if headless is not None else self.config.browser.headless_default
         )
@@ -290,31 +271,18 @@ class BrowserManager:
             )
 
         user_data_dir = self.config.paths.user_data_dir
-        args = _extra_browser_args() or None
 
-        try:
-            ensure_user_data_dir(user_data_dir)
-            logger.debug(f"Launching with persistent profile: {user_data_dir}")
-            context = await launch_persistent_context_async(
-                user_data_dir=user_data_dir,
-                headless=is_headless,
-                args=args,
-            )
-            # Chrome opens a blank page with the profile; keep it for the
-            # first create_page() instead of leaving a stray window around.
-            self._pending_initial_page = context.pages[0] if context.pages else None
-            return context
-        except Exception as error:
-            logger.error(f"Failed to launch browser: {error}")
-            raise BrowserLaunchError(
-                _launch_error_message(error, user_data_dir),
-                {
-                    "headless": is_headless,
-                    "executablePath": executable_path,
-                    "userDataDir": user_data_dir,
-                },
-                error,
-            ) from error
+        session = await get_session_manager().acquire(
+            user_data_dir, is_headless, _extra_browser_args()
+        )
+        self._session = session
+
+        # Only the process that launched the browser may claim its pre-opened
+        # blank page. When attached, those pages belong to whoever opened them.
+        if session.owns_browser and session.unclaimed_pages:
+            self._pending_initial_page = session.unclaimed_pages.pop(0)
+
+        return session.context
 
     # ------------------------------------------------------------------
     # Cookies
@@ -433,15 +401,16 @@ class BrowserManager:
 
         await self.close_all_pages()
 
-        if self._context is not None:
+        if self._session is not None:
+            session = self._session
+            self._session = None
+            self._context = None
             try:
-                # CloakBrowser patches close() to also close the browser and stop
-                # its Playwright instance.
-                await self._context.close()
+                # The manager shuts the instance down only when the last user
+                # lets go, and an attached process just disconnects.
+                await get_session_manager().release(session.profile_dir)
             except Exception as error:
-                logger.warn(f"Error closing browser: {error}")
-            finally:
-                self._context = None
+                logger.warn(f"Error releasing browser instance: {error}")
 
     async def _close_stale_pages(self) -> None:
         """Reclaim pages that were opened long ago and never closed.

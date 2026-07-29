@@ -18,9 +18,17 @@ from .browser_types import (
     ManagedBrowser,
     PageOptions,
 )
+from .session_manager import (
+    BrowserSession,
+    BrowserSessionManager,
+    get_session_manager,
+    read_devtools_endpoint,
+)
 
 __all__ = [
     "BrowserLaunchOptions",
+    "BrowserSession",
+    "BrowserSessionManager",
     "BrowserManager",
     "BrowserPoolOptions",
     "BrowserPoolService",
@@ -32,4 +40,6 @@ __all__ = [
     "get_browser_manager",
     "get_browser_pool",
     "get_pooled_browser_manager",
+    "get_session_manager",
+    "read_devtools_endpoint",
 ]

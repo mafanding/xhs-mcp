@@ -144,7 +144,31 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 | `XHS_LOG_LEVEL` | `INFO` | Log level |
 | `XHS_LOG_FILE` | `false` | Write logs to a file |
 | `XHS_BROWSER_ARGS` | empty | Extra Chromium flags (comma-separated), e.g. `--no-sandbox` |
+| `XHS_SHARE_BROWSER` | `true` | Allow attaching to a browser another process already runs; `false` makes this process exclusive |
 | `XHS_USER_DATA_DIR` | `~/.xhs-mcp/profile` | Browser profile directory holding the session (see below) |
+
+### 🏗 Architecture: entry layer / instance manager / browser layer
+
+```
+Entry layer      CLI  ·  MCP stdio  ·  MCP HTTP(SSE)
+                            │   (issue requests; never touch a browser)
+Instance manager  BrowserSessionManager
+                            │   enforces "one profile == one browser instance"
+Browser layer     BrowserManager → CloakBrowser + Playwright
+```
+
+Entry points never launch a browser; they ask the instance manager for the one
+belonging to a profile. It keys instances by profile directory:
+
+- **In-process**: the same profile reuses one instance (reference counted), with tabs running in parallel
+- **Cross-process**: Chromium records its debugging port in the profile's `DevToolsActivePort`, so a later process **attaches to the running instance** instead of launching a second one and failing
+- **Ownership**: whoever launched it closes it; an attached process only disconnects — so a one-off `xhs-mcp status` can never kill a long-running MCP server's browser
+- **Launch races**: when two processes start at once, the loser attaches to the winner rather than erroring
+
+Entry points can therefore come and go without touching this layer, and the
+browser layer can assume it is the only instance for that profile.
+
+> To make a process take a browser exclusively, set `XHS_SHARE_BROWSER=false` and give it its own `XHS_USER_DATA_DIR`.
 
 ### 🔐 The session lives in a persistent browser profile
 
@@ -160,8 +184,7 @@ xhs-mcp status     # reuses the profile, no re-scan
 Notes:
 - **Existing installs do not need to log in again**: a legacy `cookies.json` is imported into the profile on first run and then retired — nothing is ever written back to it.
 - `xhs-mcp logout` deletes the whole profile directory, but **only when it carries the `.xhs-mcp-profile` marker** this tool writes. If you point `XHS_USER_DATA_DIR` at a real Chrome profile, logout refuses and tells you why.
-- **Concurrency**: one process can drive as many tabs in parallel as you like — no second profile needed. That is how the MCP server works: three tool calls issued at once all succeed, taking about as long as the slowest rather than their sum.
-- ⚠️ But **a profile directory can only be open in one process at a time** (Chromium's `ProcessSingleton`). Concurrency therefore has to happen *within* a process; if the MCP server is running, a second `xhs-mcp status` in a terminal fails with an explanatory error. Give that one its own `XHS_USER_DATA_DIR` (it will need its own login).
+- **Concurrency**: tabs run in parallel within a process (three tool calls issued at once all succeed, taking about as long as the slowest rather than their sum); across processes the instance manager attaches to the same browser — see the architecture above.
 - Expect the profile to be ~10-50 MB.
 - `cookieCount` in `xhs://cookies` is read from the on-disk Chromium cookie database. While a browser is running it can read low, because Chromium buffers cookies in memory and flushes periodically; it settles once the browser exits. Informational only.
 

@@ -9,6 +9,11 @@ kept because it is part of the public surface (``BrowserPoolService``,
 ``get_browser_pool``, ``cleanup_browser_pool``) and callers may opt in with
 ``BrowserManager(config, use_pool=True)``.
 
+This is the one component that deliberately bypasses
+:mod:`xhs_mcp.core.browser.session_manager`: a pool means several browsers,
+which is the opposite of the one-profile-one-instance invariant that layer
+exists to hold.
+
 ⚠️ Pooled browsers are **not** signed in. The login session lives in a single
 persistent Chromium profile, and a profile directory can only be opened by one
 browser process at a time, so a pool of browsers cannot share it. Pooled
