@@ -256,21 +256,6 @@ async def test_stale_port_file_falls_back_to_launching(
     assert session.owns_browser is True
 
 
-async def test_sharing_can_be_disabled(
-    manager: BrowserSessionManager,
-    monkeypatch: pytest.MonkeyPatch,
-    fake_attach: dict[str, Any],
-    fake_launch: dict[str, Any],
-) -> None:
-    monkeypatch.setenv("XHS_SHARE_BROWSER", "false")
-
-    session = await manager.acquire("/p", True)
-
-    assert session.owns_browser is True
-    assert fake_launch["count"] == 1
-    assert "--remote-debugging-port=0" not in (fake_launch["args"] or [])
-
-
 # ----------------------------------------------------------------------
 # Launch races and failures
 # ----------------------------------------------------------------------
@@ -327,19 +312,34 @@ async def test_a_non_lock_failure_is_reported_immediately(
         await manager.acquire("/p", True)
 
 
-async def test_lock_error_with_sharing_disabled_explains_the_fix(
+async def test_unrecoverable_lock_error_suggests_a_separate_profile(
     manager: BrowserSessionManager, monkeypatch: pytest.MonkeyPatch, no_attach: None
 ) -> None:
-    monkeypatch.setenv("XHS_SHARE_BROWSER", "false")
+    """Attaching is never optional, so the only remaining advice is a new profile."""
 
     async def launch(*_a: Any, **_k: Any) -> Any:
         raise RuntimeError("Failed to create a ProcessSingleton for your profile")
 
     monkeypatch.setattr(sm, "launch_persistent_context_async", launch)
     monkeypatch.setattr(sm, "ensure_user_data_dir", lambda _d: None)
+    monkeypatch.setattr(sm, "_LAUNCH_RACE_DELAY", 0)
 
     with pytest.raises(BrowserLaunchError) as excinfo:
         await manager.acquire("/p", True)
 
     assert "XHS_USER_DATA_DIR" in str(excinfo.value)
-    assert "XHS_SHARE_BROWSER" in str(excinfo.value)
+
+
+async def test_sharing_cannot_be_disabled_by_configuration(
+    manager: BrowserSessionManager,
+    monkeypatch: pytest.MonkeyPatch,
+    fake_attach: dict[str, Any],
+    fake_launch: dict[str, Any],
+) -> None:
+    """The invariant is not a user-tunable setting."""
+    monkeypatch.setenv("XHS_SHARE_BROWSER", "false")
+
+    session = await manager.acquire("/p", True)
+
+    assert session.owns_browser is False, "still attaches; the env var is inert"
+    assert fake_launch["count"] == 0

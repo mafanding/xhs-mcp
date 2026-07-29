@@ -9,11 +9,11 @@
 ### 安装和运行
 
 ```bash
-# 使用 uvx 运行（推荐）
-xhs-mcp --help
+# 免安装运行（推荐）
+uvx xhs-mcp --help
 
-# 或者全局安装
-pip install -g xhs-mcp
+# 或者安装到环境中
+pip install xhs-mcp        # 或 uv tool install xhs-mcp
 xhs-mcp --help
 ```
 
@@ -33,6 +33,8 @@ xhs-mcp login --timeout 120
 ```bash
 xhs-mcp status
 ```
+
+> 登录态保存在持久化的浏览器 profile 目录（默认 `~/.xhs-mcp/profile`），扫码一次之后长期有效，不需要每次重新登录。详见 [README 的登录态章节](../README.md#-登录态持久化浏览器-profile)。
 
 ## 📝 内容发布
 
@@ -210,8 +212,8 @@ XHS-MCP 现在支持直接使用 HTTP/HTTPS 图片 URL 进行发布，无需手�
 ```
 xhs-mcp/
 ├── temp_images/          # 自动创建
-│   ├── img_abc123_1234567890.jpg
-│   ├── img_def456_1234567891.png
+│   ├── img_276a1ac00ba4f0ea.jpg    # img_<URL 的 SHA256 前 16 位>.<扩展名>
+│   ├── img_0d98512c4c949e03.png
 │   └── ...
 ```
 
@@ -254,24 +256,26 @@ Error: Local image file not found: ./image.jpg
 
 ```bash
 # 第一次 - 下载图片（可能需要几秒）
-xhs-mcp publish --media-paths "https://example.com/large-image.jpg"
+xhs-mcp publish --type image --title 标题 --content 正文 \
+  -m "https://example.com/large-image.jpg"
 
-# 第二次 - 使用缓存（即时）
-xhs-mcp publish --media-paths "https://example.com/large-image.jpg"
+# 第二次 - 命中缓存（无需重新下载）
+xhs-mcp publish --type image --title 标题2 --content 正文2 \
+  -m "https://example.com/large-image.jpg"
 ```
 
 ### 2. 预下载图片
 
-对于大批量发布，可以先下载图片到本地：
+对于大批量发布，可以先把图片下载到本地再用本地路径发布，避免发布过程中卡在网络上：
 
 ```bash
-# 使用测试脚本下载图片
-python scripts/cli_validation.py
+curl -o ./imgs/1.jpg https://example.com/1.jpg
+xhs-mcp publish --type image --title 标题 --content 正文 -m ./imgs/1.jpg
 ```
 
 ### 3. 合理控制并发
 
-避免同时运行多个发布任务，建议串行执行。
+同一进程内可以并行处理多个请求（MCP 服务即如此），但**发布操作建议串行**：小红书对发帖频率有风控，并发发布容易触发限制。
 
 ## ⚠️ 注意事项
 
@@ -321,10 +325,9 @@ echo '{"jsonrpc": "2.0", "id": 1, "method": "tools/list"}' | xhs-mcp mcp
 
 ## 📚 更多资源
 
-- [图片 URL 发布完整指南](./examples/image-url-publish.md)
-- [项目结构文档](./PROJECT_STRUCTURE.md)
 - [HTTP 传输文档](./HTTP_TRANSPORTS.md)
-- [测试脚本](./examples/test-image-url-download.js)
+- [移植说明](./PORTING_NOTES.md) - 架构分层、登录态方案与所有与 TypeScript 原版的差异
+- [示例图片](../examples/README.md)
 
 ## 🤝 获取帮助
 

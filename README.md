@@ -211,7 +211,6 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 | `XHS_LOG_LEVEL` | `INFO` | 日志级别 |
 | `XHS_LOG_FILE` | `false` | 是否写入日志文件 |
 | `XHS_BROWSER_ARGS` | 空 | 追加的 Chromium 参数（逗号分隔），如 `--no-sandbox` |
-| `XHS_SHARE_BROWSER` | `true` | 是否允许跨进程接管同一浏览器实例；设 `false` 则本进程独占
 | `XHS_USER_DATA_DIR` | `~/.xhs-mcp/profile` | 浏览器 profile 目录（登录态所在），见下 |
 
 ### 🏗 架构：入口层 / 实例管理层 / 浏览器层
@@ -233,7 +232,7 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 
 因此不管入口怎么增减，这一层不用改；下面的浏览器层也可以假定自己是该 profile 唯一的实例。
 
-> 想让某个进程独占浏览器（不接管、不被接管），设 `XHS_SHARE_BROWSER=false`，并给它单独的 `XHS_USER_DATA_DIR`。
+> 这一层没有开关。「一个 profile 一个实例」是它存在的意义，放个开关去关掉它只会把本来能用的场景变成 profile 抢锁失败。真的需要独立浏览器时，用不同的 `XHS_USER_DATA_DIR` —— 那才是语义正确的做法。
 
 ### 🔐 登录态：持久化浏览器 profile
 

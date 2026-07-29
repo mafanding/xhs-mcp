@@ -19,14 +19,15 @@ when the MCP server and a CLI command run side by side. Whoever launched the
 browser owns it and closes it; anyone who attached merely disconnects, so a
 short-lived CLI command can never kill a long-running server's browser.
 
-Set ``XHS_SHARE_BROWSER=false`` to disable attaching and require an exclusive
-browser per process (each process then needs its own ``XHS_USER_DATA_DIR``).
+There is deliberately no switch to turn this off. The invariant is the point of
+this layer, and disabling sharing could only ever turn a working setup into a
+profile-lock failure. Callers that genuinely want an isolated browser ask for it
+the meaningful way: a different ``XHS_USER_DATA_DIR``.
 """
 
 from __future__ import annotations
 
 import asyncio
-import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -48,10 +49,6 @@ _ATTACH_PROBE_TIMEOUT = 2.0
 
 _LAUNCH_RACE_RETRIES = 3
 _LAUNCH_RACE_DELAY = 0.75
-
-
-def _sharing_enabled() -> bool:
-    return os.environ.get("XHS_SHARE_BROWSER", "true").strip().lower() != "false"
 
 
 def _is_profile_lock_error(error: BaseException) -> bool:
@@ -181,22 +178,19 @@ class BrowserSessionManager:
         self, profile_dir: str, headless: bool, extra_args: list[str]
     ) -> BrowserSession:
         """Attach to a running browser for this profile, or launch one."""
-        sharing = _sharing_enabled()
-
-        if sharing:
-            attached = await self._try_attach(profile_dir)
-            if attached is not None:
-                return attached
+        attached = await self._try_attach(profile_dir)
+        if attached is not None:
+            return attached
 
         last_error: BaseException | None = None
 
         for attempt in range(_LAUNCH_RACE_RETRIES):
             try:
-                return await self._launch(profile_dir, headless, extra_args, sharing)
+                return await self._launch(profile_dir, headless, extra_args)
             except Exception as error:
                 last_error = error
 
-                if not (sharing and _is_profile_lock_error(error)):
+                if not _is_profile_lock_error(error):
                     break
 
                 # Another process won the race and is starting the browser this
@@ -213,7 +207,7 @@ class BrowserSessionManager:
 
         assert last_error is not None
         raise BrowserLaunchError(
-            self._launch_error_message(last_error, profile_dir, sharing),
+            self._launch_error_message(last_error, profile_dir),
             {"headless": headless, "userDataDir": profile_dir},
             last_error,
         ) from last_error
@@ -258,16 +252,14 @@ class BrowserSessionManager:
             return None
 
     async def _launch(
-        self, profile_dir: str, headless: bool, extra_args: list[str], sharing: bool
+        self, profile_dir: str, headless: bool, extra_args: list[str]
     ) -> BrowserSession:
         ensure_user_data_dir(profile_dir)
 
-        args = list(extra_args)
-        if sharing:
-            # Makes this instance discoverable, so later processes attach
-            # instead of failing on the profile lock. Verified not to change
-            # the browser's fingerprint.
-            args.append(_DEBUG_PORT_ARG)
+        # Makes this instance discoverable, so later processes attach instead of
+        # failing on the profile lock. Verified not to change the browser's
+        # fingerprint.
+        args = [*extra_args, _DEBUG_PORT_ARG]
 
         logger.debug(f"Launching browser instance for {profile_dir}")
         context = await launch_persistent_context_async(
@@ -286,22 +278,13 @@ class BrowserSessionManager:
         )
 
     @staticmethod
-    def _launch_error_message(
-        error: BaseException, profile_dir: str, sharing: bool
-    ) -> str:
+    def _launch_error_message(error: BaseException, profile_dir: str) -> str:
         if _is_profile_lock_error(error):
-            if sharing:
-                return (
-                    f"Failed to launch browser: the profile directory {profile_dir} "
-                    f"is held by another process, and attaching to that browser "
-                    f"did not succeed either. It may be shutting down — retry in a "
-                    f"moment. Original error: {error}"
-                )
             return (
                 f"Failed to launch browser: the profile directory {profile_dir} is "
-                f"already in use by another browser process, and XHS_SHARE_BROWSER "
-                f"is disabled so attaching is not allowed. Give this process its "
-                f"own XHS_USER_DATA_DIR, or re-enable sharing. "
+                f"held by another process, and attaching to that browser did not "
+                f"succeed either. It may be shutting down — retry in a moment, or "
+                f"give this process its own XHS_USER_DATA_DIR. "
                 f"Original error: {error}"
             )
 

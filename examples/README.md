@@ -93,6 +93,6 @@ xhs-mcp publish \
 ## 🔗 Related Documentation
 
 - [Usage Guide](../docs/USAGE_GUIDE.md) - Complete usage documentation
-- [Publish Guide](../docs/PUBLISH_GUIDE.md) - Publishing guide
+- [Usage Guide](../docs/USAGE_GUIDE.md) - Usage guide
 - [README](../README.md) - Main project documentation
 

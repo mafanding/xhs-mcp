@@ -218,4 +218,4 @@ if self._context is None:
 
 因此常驻 MCP 服务运行时，终端再跑 `xhs-mcp status` 会自动接管同一实例（实测通过），且该命令退出**不会**杀掉服务的浏览器（实测通过）。
 
-**为实现跨进程接管，启动参数增加了 `--remote-debugging-port=0`**（端口由系统分配，仅监听 127.0.0.1）。已实测对比开启前后的指纹（`navigator.webdriver` / `plugins` / `window.chrome` / UA / WebGL vendor 等）**完全一致**——Playwright 本来就通过 CDP 驱动浏览器，多暴露一个本地端口不改变页面内可见的信号。若仍希望关闭，设 `XHS_SHARE_BROWSER=false`（该进程独占，不接管也不被接管）。
+**为实现跨进程接管，启动参数增加了 `--remote-debugging-port=0`**（端口由系统分配，仅监听 127.0.0.1）。已实测对比开启前后的指纹（`navigator.webdriver` / `plugins` / `window.chrome` / UA / WebGL vendor 等）**完全一致**——Playwright 本来就通过 CDP 驱动浏览器，多暴露一个本地端口不改变页面内可见的信号。此处刻意**不提供关闭开关**：单实例是这一层存在的意义，放开关只会让本来能用的场景变成抢锁失败；需要独立浏览器就用不同的 `XHS_USER_DATA_DIR`。

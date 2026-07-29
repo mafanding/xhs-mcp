@@ -144,7 +144,6 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 | `XHS_LOG_LEVEL` | `INFO` | Log level |
 | `XHS_LOG_FILE` | `false` | Write logs to a file |
 | `XHS_BROWSER_ARGS` | empty | Extra Chromium flags (comma-separated), e.g. `--no-sandbox` |
-| `XHS_SHARE_BROWSER` | `true` | Allow attaching to a browser another process already runs; `false` makes this process exclusive |
 | `XHS_USER_DATA_DIR` | `~/.xhs-mcp/profile` | Browser profile directory holding the session (see below) |
 
 ### 🏗 Architecture: entry layer / instance manager / browser layer
@@ -168,7 +167,7 @@ belonging to a profile. It keys instances by profile directory:
 Entry points can therefore come and go without touching this layer, and the
 browser layer can assume it is the only instance for that profile.
 
-> To make a process take a browser exclusively, set `XHS_SHARE_BROWSER=false` and give it its own `XHS_USER_DATA_DIR`.
+> There is deliberately no switch for this. The invariant is the point of the layer, and turning it off could only turn a working setup into a profile-lock failure. When a process genuinely needs its own browser, give it its own `XHS_USER_DATA_DIR` — the meaningful way to ask.
 
 ### 🔐 The session lives in a persistent browser profile
 
