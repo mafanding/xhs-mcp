@@ -28,6 +28,7 @@ the meaningful way: a different ``XHS_USER_DATA_DIR``.
 from __future__ import annotations
 
 import asyncio
+import os
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -49,6 +50,17 @@ _ATTACH_PROBE_TIMEOUT = 2.0
 
 _LAUNCH_RACE_RETRIES = 3
 _LAUNCH_RACE_DELAY = 0.75
+
+
+def _humanize_enabled() -> bool:
+    """Human-like mouse curves, key timing and scrolling.
+
+    On by default: behavioural signals are what a fingerprint patch cannot
+    cover. It is not free — typing runs about 1.25s per character, which is why
+    publishing goes through the task queue rather than a blocking tool call.
+    Set ``XHS_HUMANIZE=false`` to trade realism back for speed.
+    """
+    return os.environ.get("XHS_HUMANIZE", "true").strip().lower() != "false"
 
 
 def _is_profile_lock_error(error: BaseException) -> bool:
@@ -278,11 +290,15 @@ class BrowserSessionManager:
         # fingerprint.
         args = [*extra_args, _DEBUG_PORT_ARG]
 
-        logger.debug(f"Launching browser instance for {profile_dir}")
+        humanize = _humanize_enabled()
+        logger.debug(
+            f"Launching browser instance for {profile_dir} (humanize={humanize})"
+        )
         context = await launch_persistent_context_async(
             user_data_dir=profile_dir,
             headless=headless,
             args=args or None,
+            humanize=humanize,
         )
 
         return BrowserSession(

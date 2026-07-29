@@ -105,7 +105,7 @@ async def test_shutdown_all_releases_every_instance(
         async def close(self) -> None:
             closed.append(self.name)
 
-    async def launch(user_data_dir: str, headless: bool, args=None) -> _Context:
+    async def launch(user_data_dir: str, headless: bool, args=None, humanize: bool = False) -> _Context:
         return _Context(user_data_dir)
 
     monkeypatch.setattr(sm, "launch_persistent_context_async", launch)

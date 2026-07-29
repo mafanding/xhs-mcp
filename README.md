@@ -46,7 +46,8 @@ uv tool install xhs-mcp
 - `xhs_discover_feeds`、`xhs_search_note`、`xhs_get_note_detail`
 - `xhs_comment_on_note`
 - `xhs_get_user_notes`、`xhs_delete_note`（用户笔记管理）
-- `xhs_publish_content`（统一发布接口：`type`、`title`、`content`、`media_paths`、`tags`）
+- `xhs_publish_content`（统一发布接口：`type`、`title`、`content`、`media_paths`、`tags`）—— **异步**，返回 `taskId`
+- `xhs_task_status`、`xhs_task_list`（查询后台任务）
   - **图片发布**：1-18个图片文件或URL
   - **视频发布**：恰好1个视频文件
   - **混合使用**：支持图片URL和本地路径混合
@@ -211,6 +212,7 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 | `XHS_LOG_LEVEL` | `INFO` | 日志级别 |
 | `XHS_LOG_FILE` | `false` | 是否写入日志文件 |
 | `XHS_BROWSER_ARGS` | 空 | 追加的 Chromium 参数（逗号分隔），如 `--no-sandbox` |
+| `XHS_HUMANIZE` | `true` | 行为拟人化（鼠标曲线、按键节奏、滚动）。关闭可大幅提速
 | `XHS_USER_DATA_DIR` | `~/.xhs-mcp/profile` | 浏览器 profile 目录（登录态所在），见下 |
 
 ### 🏗 架构：入口层 / 实例管理层 / 浏览器层
@@ -233,6 +235,27 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 因此不管入口怎么增减，这一层不用改；下面的浏览器层也可以假定自己是该 profile 唯一的实例。
 
 > 这一层没有开关。「一个 profile 一个实例」是它存在的意义，放个开关去关掉它只会把本来能用的场景变成 profile 抢锁失败。真的需要独立浏览器时，用不同的 `XHS_USER_DATA_DIR` —— 那才是语义正确的做法。
+
+### ⏳ 长任务：异步队列
+
+启用行为拟人化后，正文是逐字输入的（约 1.25 秒/字），发一条千字笔记要十几分钟 —— 没有任何 MCP 客户端会等这么久。因此**发布和登录走后台队列**：
+
+```jsonc
+// 1. 调用 xhs_publish_content，立即返回（实测 0.01s）
+{ "success": true, "status": "queued", "taskId": "24b31f72...", "queuePosition": 0 }
+
+// 2. 用 xhs_task_status 轮询
+{ "taskId": "24b31f72...", "kind": "publish_image", "status": "running",
+  "detail": { "type": "image", "title": "今日美食", "mediaCount": 1 } }
+
+// 3. 完成后
+{ "status": "succeeded", "durationMs": 812340, "result": { "noteId": "..." } }
+```
+
+- 队列**串行执行**：浏览器是共享资源，且小红书对短时间内连续发帖有风控，一次只跑一个长任务是有意为之。
+- 只读操作（`status` / `feeds` / `search` / 详情）**不进队列**，仍然并发跑在各自的 tab 里。
+- CLI 的 `xhs-mcp publish` 仍然是阻塞式的 —— 终端里等着更自然，且进程退出队列也就没了。
+- 任务只存在于进程内存中，服务重启后丢失。
 
 ### 🔐 登录态：持久化浏览器 profile
 

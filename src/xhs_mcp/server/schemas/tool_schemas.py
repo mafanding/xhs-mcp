@@ -12,7 +12,11 @@ from typing import Any
 XHS_TOOL_SCHEMAS: list[dict[str, Any]] = [
     {
         "name": "xhs_auth_login",
-        "description": "Start XiaoHongShu login process.",
+        "description": (
+            "Start the XiaoHongShu login flow. Opens a browser for QR scanning "
+            "and returns a taskId immediately; poll xhs_task_status or "
+            "xhs_auth_status to see when it completes."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -125,7 +129,12 @@ XHS_TOOL_SCHEMAS: list[dict[str, Any]] = [
     },
     {
         "name": "xhs_publish_content",
-        "description": "Publish content to XiaoHongShu (supports both images and videos).",
+        "description": (
+            "Publish content to XiaoHongShu (supports both images and videos). "
+            "Runs as a background task: returns a taskId immediately, poll "
+            "xhs_task_status for the result. Publishing takes minutes because "
+            "the note body is typed with human-like timing."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -165,6 +174,43 @@ XHS_TOOL_SCHEMAS: list[dict[str, Any]] = [
                 },
             },
             "required": ["type", "title", "content", "media_paths"],
+        },
+    },
+    {
+        "name": "xhs_task_status",
+        "description": (
+            "Check a background task queued by xhs_publish_content or "
+            "xhs_auth_login."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "task_id": {
+                    "type": "string",
+                    "description": "Task ID returned when the work was queued (required)",
+                },
+            },
+            "required": ["task_id"],
+        },
+    },
+    {
+        "name": "xhs_task_list",
+        "description": "List recent background tasks, newest first.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "limit": {
+                    "type": "number",
+                    "description": "Number of tasks to return (default: 20)",
+                },
+                "kind": {
+                    "type": "string",
+                    "description": (
+                        "Filter by task kind, e.g. publish_image, publish_video, "
+                        "auth_login"
+                    ),
+                },
+            },
         },
     },
     {

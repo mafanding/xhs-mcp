@@ -144,6 +144,7 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 | `XHS_LOG_LEVEL` | `INFO` | Log level |
 | `XHS_LOG_FILE` | `false` | Write logs to a file |
 | `XHS_BROWSER_ARGS` | empty | Extra Chromium flags (comma-separated), e.g. `--no-sandbox` |
+| `XHS_HUMANIZE` | `true` | Human-like mouse, key timing and scrolling. Turn off for speed
 | `XHS_USER_DATA_DIR` | `~/.xhs-mcp/profile` | Browser profile directory holding the session (see below) |
 
 ### 🏗 Architecture: entry layer / instance manager / browser layer
@@ -170,6 +171,20 @@ Entry points can therefore come and go without touching this layer, and the
 browser layer can assume it is the only instance for that profile.
 
 > There is deliberately no switch for this. The invariant is the point of the layer, and turning it off could only turn a working setup into a profile-lock failure. When a process genuinely needs its own browser, give it its own `XHS_USER_DATA_DIR` — the meaningful way to ask.
+
+### ⏳ Long work runs on a queue
+
+With humanization on, the note body is typed one character at a time (~1.25s
+each), so a thousand-character post takes over ten minutes — longer than any MCP
+client will hold a call open. **Publishing and login therefore run as background
+tasks**: the tool returns a `taskId` immediately (measured at 0.01s) and you poll
+`xhs_task_status`.
+
+The queue is **serial** on purpose: the browser is shared, and XiaoHongShu
+rate-limits accounts that publish in bursts. Read-only operations (status, feeds,
+search, detail) skip the queue entirely and still run concurrently in their own
+tabs. `xhs-mcp publish` on the CLI still blocks, which is the natural thing in a
+terminal. Tasks live in process memory and are lost on restart.
 
 ### 🔐 The session lives in a persistent browser profile
 

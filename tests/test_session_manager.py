@@ -66,7 +66,7 @@ def no_attach(monkeypatch: pytest.MonkeyPatch) -> None:
 def fake_launch(monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
     state: dict[str, Any] = {"count": 0, "args": None}
 
-    async def launch(user_data_dir: str, headless: bool, args: Any = None) -> _FakeContext:
+    async def launch(user_data_dir: str, headless: bool, args: Any = None, humanize: bool = False) -> _FakeContext:
         state["count"] += 1
         state["args"] = args
         state["headless"] = headless

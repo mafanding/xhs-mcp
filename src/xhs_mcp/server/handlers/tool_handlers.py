@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-import json
 from typing import Any
 
 from ...core.auth.auth_service import AuthService
@@ -11,14 +9,13 @@ from ...core.browser.session_manager import get_session_manager
 from ...core.feeds.feed_service import FeedService
 from ...core.notes.note_service import NoteService
 from ...core.publishing.publish_service import PublishService
+from ...core.tasks import get_task_queue
 from ...shared.config import get_config
 from ...shared.errors import XHSError
-from ...shared.logger import logger
 from ...shared.title_validator import assert_title_width_valid
 from ...shared.utils import (
     create_mcp_error_response,
     create_mcp_tool_response,
-    safe_error_handler,
     validate_required_params,
 )
 
@@ -42,61 +39,47 @@ class ToolHandlers:
         self.feed_service = FeedService(config)
         self.publish_service = PublishService(config)
         self.note_service = NoteService(config)
-        self._background_tasks: set[asyncio.Task[Any]] = set()
 
     async def shutdown(self) -> None:
-        """Release the browser instances this process holds."""
-        for task in list(self._background_tasks):
-            task.cancel()
+        """Stop queued work and release the browser instances this process holds."""
+        await get_task_queue().shutdown()
         await get_session_manager().shutdown_all()
 
     async def handle_auth_login(self, browser_path: str | None = None) -> dict[str, Any]:
-        """Kick off login in the background and return immediately.
+        """Queue the login flow and return immediately.
 
-        Login needs a human to scan a QR code, so blocking the tool call would
-        stall the client for minutes; the caller polls ``xhs_auth_status``.
+        Login waits for a human to scan a QR code, so it cannot be answered
+        inside a tool call; the caller polls ``xhs_task_status`` or
+        ``xhs_auth_status``.
         """
+        task = get_task_queue().submit(
+            "auth_login",
+            lambda: self.auth_service.login(browser_path),
+            {"description": "Waiting for QR code login"},
+        )
 
-        async def run_login() -> None:
-            try:
-                await self.auth_service.login(browser_path)
-            except Exception as error:
-                safe_error_handler(error, "Background login error", logger)
-
-        task = asyncio.create_task(run_login())
-        self._background_tasks.add(task)
-        task.add_done_callback(self._background_tasks.discard)
-
-        return {
-            "content": [
-                {
-                    "type": "text",
-                    "text": json.dumps(
-                        {
-                            "success": True,
-                            "message": (
-                                "Login process started. A browser window will open "
-                                "for you to complete the login."
-                            ),
-                            "status": "login_started",
-                            "action": "browser_opened",
-                            "instructions": [
-                                "1. Complete the login process in the opened browser window",
-                                "2. Scan QR code or enter your credentials",
-                                "3. Login will be automatically verified and cookies saved",
-                                "4. Use xhs_auth_status to check if login completed",
-                            ],
-                            "note": (
-                                "The login process runs in the background. You can "
-                                "continue using other tools while login completes."
-                            ),
-                        },
-                        ensure_ascii=False,
-                        indent=2,
-                    ),
-                }
-            ]
-        }
+        return create_mcp_tool_response(
+            {
+                "success": True,
+                "message": (
+                    "Login process started. A browser window will open for you "
+                    "to complete the login."
+                ),
+                "status": "login_started",
+                "action": "browser_opened",
+                "taskId": task.id,
+                "instructions": [
+                    "1. Complete the login process in the opened browser window",
+                    "2. Scan QR code or enter your credentials",
+                    "3. Login will be automatically verified and the session saved",
+                    "4. Poll xhs_task_status with the taskId, or use xhs_auth_status",
+                ],
+                "note": (
+                    "The login runs in the background. You can continue using "
+                    "other tools while it completes."
+                ),
+            }
+        )
 
     async def handle_auth_logout(self) -> dict[str, Any]:
         return create_mcp_tool_response(await self.auth_service.logout())
@@ -174,10 +157,28 @@ class ToolHandlers:
         if len(content) > 1000:
             raise ValueError("Content must be 1000 characters or less")
 
-        return create_mcp_tool_response(
-            await self.publish_service.publish_content(
+        # Publishing types the body one keystroke at a time with humanized
+        # timing, so it runs for minutes. Queue it and hand back a task id
+        # rather than holding the tool call open.
+        task = get_task_queue().submit(
+            f"publish_{content_type}",
+            lambda: self.publish_service.publish_content(
                 content_type, title, content, media_paths, tags or "", browser_path
-            )
+            ),
+            {"type": content_type, "title": title, "mediaCount": len(media_paths)},
+        )
+
+        return create_mcp_tool_response(
+            {
+                "success": True,
+                "status": "queued",
+                "taskId": task.id,
+                "message": (
+                    f"Publish queued as task {task.id}. Poll xhs_task_status with "
+                    f"this taskId for the result."
+                ),
+                "queuePosition": get_task_queue().pending_count,
+            }
         )
 
     async def handle_get_user_notes(
@@ -207,6 +208,29 @@ class ToolHandlers:
                 await self.note_service.delete_note(note_id, browser_path)
             )
         raise ValueError("Either note_id or last_published must be specified")
+
+    async def handle_task_status(self, task_id: str | None = None) -> dict[str, Any]:
+        validate_required_params({"taskId": task_id}, ["taskId"])
+
+        task = get_task_queue().get(task_id)
+        if task is None:
+            raise ValueError(f"Unknown task: {task_id}")
+
+        return create_mcp_tool_response({"success": True, **task.to_dict()})
+
+    async def handle_task_list(
+        self, limit: int | None = None, kind: str | None = None
+    ) -> dict[str, Any]:
+        tasks = get_task_queue().list(limit if limit is not None else 20, kind)
+
+        return create_mcp_tool_response(
+            {
+                "success": True,
+                "tasks": [task.to_dict() for task in tasks],
+                "count": len(tasks),
+                "pending": get_task_queue().pending_count,
+            }
+        )
 
     async def handle_tool_request(
         self, name: str, args: dict[str, Any] | None = None
@@ -261,6 +285,12 @@ class ToolHandlers:
                 return await self.handle_get_user_notes(
                     args.get("limit"), args.get("cursor"), args.get("browser_path")
                 )
+
+            if name == "xhs_task_status":
+                return await self.handle_task_status(args.get("task_id"))
+
+            if name == "xhs_task_list":
+                return await self.handle_task_list(args.get("limit"), args.get("kind"))
 
             if name == "xhs_delete_note":
                 return await self.handle_delete_note(

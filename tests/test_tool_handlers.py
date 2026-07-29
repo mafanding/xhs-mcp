@@ -40,7 +40,6 @@ def handlers() -> ToolHandlers:
     instance.feed_service = _Recorder()  # type: ignore[assignment]
     instance.publish_service = _Recorder()  # type: ignore[assignment]
     instance.note_service = _Recorder()  # type: ignore[assignment]
-    instance._background_tasks = set()
     return instance
 
 
@@ -63,7 +62,7 @@ def test_every_schema_tool_is_routable() -> None:
 
 
 def test_schema_counts() -> None:
-    assert len(XHS_TOOL_SCHEMAS) == 10
+    assert len(XHS_TOOL_SCHEMAS) == 12
     assert len(XHS_RESOURCE_SCHEMAS) == 3
 
 
@@ -166,17 +165,28 @@ async def test_publish_rejects_over_long_content(handlers: ToolHandlers) -> None
     assert payload["message"] == "Content must be 1000 characters or less"
 
 
-async def test_publish_routes_to_publish_content(handlers: ToolHandlers) -> None:
-    await handlers.handle_tool_request(
-        "xhs_publish_content",
-        {
-            "type": "image",
-            "title": "标题",
-            "content": "正文",
-            "media_paths": ["a.jpg"],
-            "tags": "a,b",
-        },
+async def test_publish_is_queued_and_returns_a_task_id(handlers: ToolHandlers) -> None:
+    """Publishing runs for minutes, so it must not hold the tool call open."""
+    from xhs_mcp.core.tasks import get_task_queue
+
+    payload = _payload(
+        await handlers.handle_tool_request(
+            "xhs_publish_content",
+            {
+                "type": "image",
+                "title": "标题",
+                "content": "正文",
+                "media_paths": ["a.jpg"],
+                "tags": "a,b",
+            },
+        )
     )
+
+    assert payload["status"] == "queued"
+    assert payload["taskId"]
+
+    task = await get_task_queue().wait(payload["taskId"], timeout=5)
+    assert task.status.value == "succeeded"
     assert handlers.publish_service.calls == [  # type: ignore[attr-defined]
         ("publish_content", ("image", "标题", "正文", ["a.jpg"], "a,b", None), {})
     ]
@@ -209,7 +219,7 @@ async def test_logout_routes(handlers: ToolHandlers) -> None:
     assert handlers.auth_service.calls == [("logout", (), {})]  # type: ignore[attr-defined]
 
 
-async def test_login_returns_immediately_without_awaiting_login(
+async def test_login_returns_immediately_with_a_task_id(
     handlers: ToolHandlers,
 ) -> None:
     """Login needs a human at the browser, so the tool must not block on it."""
@@ -218,7 +228,7 @@ async def test_login_returns_immediately_without_awaiting_login(
     assert payload["status"] == "login_started"
     assert payload["action"] == "browser_opened"
     assert len(payload["instructions"]) == 4
-    assert len(handlers._background_tasks) == 1
+    assert payload["taskId"]
 
 
 async def test_tool_response_is_pretty_printed_json(handlers: ToolHandlers) -> None:
