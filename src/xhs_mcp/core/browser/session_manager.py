@@ -174,6 +174,23 @@ class BrowserSessionManager:
             except Exception as error:
                 logger.warn(f"Error shutting down browser instance: {error}")
 
+    async def shutdown_all(self) -> None:
+        """Drop every instance this process holds, whatever the reference counts.
+
+        This is the teardown entry points call on their way out: the process is
+        going away, so its references go with it. Ownership still decides what
+        that means — an instance this process launched is closed, one it merely
+        attached to is disconnected from and left running for its owner.
+        """
+        for profile_dir in list(self._sessions):
+            session = self._sessions.pop(profile_dir, None)
+            if session is None:
+                continue
+            try:
+                await session.shutdown()
+            except Exception as error:
+                logger.warn(f"Error shutting down browser instance: {error}")
+
     async def _open(
         self, profile_dir: str, headless: bool, extra_args: list[str]
     ) -> BrowserSession:

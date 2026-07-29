@@ -156,8 +156,10 @@ Instance manager  BrowserSessionManager
 Browser layer     BrowserManager → CloakBrowser + Playwright
 ```
 
-Entry points never launch a browser; they ask the instance manager for the one
-belonging to a profile. It keys instances by profile directory:
+Entry points hold **services only** — no browser objects, and no launching. To
+tear down they call the instance manager's `shutdown_all()` rather than reaching
+into a service for whichever browser it happens to use. Instances are keyed by
+profile directory:
 
 - **In-process**: the same profile reuses one instance (reference counted), with tabs running in parallel
 - **Cross-process**: Chromium records its debugging port in the profile's `DevToolsActivePort`, so a later process **attaches to the running instance** instead of launching a second one and failing

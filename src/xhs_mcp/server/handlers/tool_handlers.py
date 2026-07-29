@@ -7,7 +7,7 @@ import json
 from typing import Any
 
 from ...core.auth.auth_service import AuthService
-from ...core.browser.browser_manager import BrowserManager
+from ...core.browser.session_manager import get_session_manager
 from ...core.feeds.feed_service import FeedService
 from ...core.notes.note_service import NoteService
 from ...core.publishing.publish_service import PublishService
@@ -26,19 +26,29 @@ from ...shared.utils import (
 class ToolHandlers:
     """Dispatches MCP tool calls to the domain services.
 
-    All services share one :class:`BrowserManager`, matching the original. Note
-    the consequence: the browser is launched on the first tool call and cached,
-    so whichever tool runs first fixes headless mode for the process lifetime.
+    This is the entry layer: it holds services and nothing else. Services reach
+    the browser through the instance manager, which keeps every one of them on
+    the same browser for a given profile — so there is no shared browser object
+    to pass around here.
+
+    One inherited consequence is worth knowing: the browser is launched on the
+    first tool call and then reused, so whichever tool runs first fixes headless
+    mode for the process lifetime.
     """
 
     def __init__(self) -> None:
         config = get_config()
-        self.browser_manager = BrowserManager(config)
-        self.auth_service = AuthService(config, self.browser_manager)
-        self.feed_service = FeedService(config, self.browser_manager)
-        self.publish_service = PublishService(config, self.browser_manager)
-        self.note_service = NoteService(config, self.browser_manager)
+        self.auth_service = AuthService(config)
+        self.feed_service = FeedService(config)
+        self.publish_service = PublishService(config)
+        self.note_service = NoteService(config)
         self._background_tasks: set[asyncio.Task[Any]] = set()
+
+    async def shutdown(self) -> None:
+        """Release the browser instances this process holds."""
+        for task in list(self._background_tasks):
+            task.cancel()
+        await get_session_manager().shutdown_all()
 
     async def handle_auth_login(self, browser_path: str | None = None) -> dict[str, Any]:
         """Kick off login in the background and return immediately.

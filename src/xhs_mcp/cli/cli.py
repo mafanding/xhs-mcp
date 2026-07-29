@@ -17,7 +17,7 @@ from typing import Any, TypeVar
 import click
 
 from ..core.auth.auth_service import AuthService
-from ..core.browser.browser_manager import BrowserManager
+from ..core.browser.session_manager import get_session_manager
 from ..core.feeds.feed_service import FeedService
 from ..core.notes.note_service import NoteService
 from ..core.publishing.publish_service import PublishService
@@ -42,25 +42,21 @@ _KNOWN_MESSAGE_FRAGMENTS = (
 
 
 class CLIState:
-    """Holds process-wide CLI options and the managers that need tearing down."""
+    """Holds process-wide CLI options.
+
+    Deliberately owns no browser objects: this is the entry layer, so tearing
+    down is a call to the instance manager rather than reaching into a service
+    for the browser it happens to be using.
+    """
 
     def __init__(self) -> None:
         self.compact = False
-        self.browser_managers: list[BrowserManager] = []
-
-    def track(self, *services: Any) -> None:
-        for service in services:
-            manager = getattr(service, "browser_manager", None)
-            if manager is not None and manager not in self.browser_managers:
-                self.browser_managers.append(manager)
 
     async def cleanup(self) -> None:
-        for manager in self.browser_managers:
-            try:
-                await manager.cleanup()
-            except Exception:
-                pass
-        self.browser_managers.clear()
+        try:
+            await get_session_manager().shutdown_all()
+        except Exception:
+            pass
 
 
 def format_error_message(error: BaseException | str) -> str:
@@ -190,7 +186,6 @@ def login(state: CLIState, timeout: int | None) -> None:
     config = get_config()
     timeout_sec = timeout if timeout is not None else config.browser.login_timeout
     service = AuthService(config)
-    state.track(service)
     run_command(state, lambda: service.login(None, timeout_sec))
 
 
@@ -199,7 +194,6 @@ def login(state: CLIState, timeout: int | None) -> None:
 def logout(state: CLIState) -> None:
     """Logout from XiaoHongShu and clear saved cookies."""
     service = AuthService(get_config())
-    state.track(service)
     run_command(state, service.logout)
 
 
@@ -208,7 +202,6 @@ def logout(state: CLIState) -> None:
 def status(state: CLIState) -> None:
     """Check current XiaoHongShu login status."""
     service = AuthService(get_config())
-    state.track(service)
     run_command(state, lambda: service.check_status(None))
 
 
@@ -271,7 +264,6 @@ def browser(state: CLIState, with_deps: bool) -> None:
 def feeds(state: CLIState, browser_path: str | None) -> None:
     """Discover home page feeds."""
     service = FeedService(get_config())
-    state.track(service)
     run_command(state, lambda: service.get_feed_list(browser_path))
 
 
@@ -282,7 +274,6 @@ def feeds(state: CLIState, browser_path: str | None) -> None:
 def search(state: CLIState, keyword: str, browser_path: str | None) -> None:
     """Search notes by keyword."""
     service = FeedService(get_config())
-    state.track(service)
     run_command(state, lambda: service.search_feeds(keyword, browser_path))
 
 
@@ -301,7 +292,6 @@ def comment(
 ) -> None:
     """Comment on a note."""
     service = FeedService(get_config())
-    state.track(service)
     run_command(
         state, lambda: service.comment_on_feed(feed_id, xsec_token, note, browser_path)
     )
@@ -327,7 +317,6 @@ def usernote_list(
 ) -> None:
     """List current user's published notes."""
     service = NoteService(get_config())
-    state.track(service)
 
     try:
         parsed_limit = int(limit) or 20
@@ -350,7 +339,6 @@ def usernote_delete(
 ) -> None:
     """Delete user notes."""
     service = NoteService(get_config())
-    state.track(service)
 
     if last_published:
         run_command(state, lambda: service.delete_last_published_note(browser_path))
@@ -406,7 +394,6 @@ def publish(
 ) -> None:
     """Publish content to XiaoHongShu (supports both images and videos)."""
     service = PublishService(get_config())
-    state.track(service)
 
     if content_type not in ("image", "video"):
         print_error(state, Exception('Type must be "image" or "video"'))

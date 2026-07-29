@@ -219,3 +219,17 @@ if self._context is None:
 因此常驻 MCP 服务运行时，终端再跑 `xhs-mcp status` 会自动接管同一实例（实测通过），且该命令退出**不会**杀掉服务的浏览器（实测通过）。
 
 **为实现跨进程接管，启动参数增加了 `--remote-debugging-port=0`**（端口由系统分配，仅监听 127.0.0.1）。已实测对比开启前后的指纹（`navigator.webdriver` / `plugins` / `window.chrome` / UA / WebGL vendor 等）**完全一致**——Playwright 本来就通过 CDP 驱动浏览器，多暴露一个本地端口不改变页面内可见的信号。此处刻意**不提供关闭开关**：单实例是这一层存在的意义，放开关只会让本来能用的场景变成抢锁失败；需要独立浏览器就用不同的 `XHS_USER_DATA_DIR`。
+
+## 20. 入口层只持有 service
+
+第 19 节建好管理层后，入口层仍然握着浏览器层对象：`ToolHandlers` 在构造函数里 `BrowserManager(config)` 再注入各 service，CLI 的 `CLIState.track()` 更是用 `getattr(service, "browser_manager")` 反向掏 service 的内部字段。虽然最终都汇到管理层、不会起第二个实例，但这层耦合让"入口怎么变都不影响下面"这句话不成立。
+
+现在：
+
+- `ToolHandlers` 只持有四个 service；各 service 自己建 `BrowserManager`，由管理层保证它们落到同一个实例上（实测 3 次 tool call：浏览器 `Launching` 1 次、`Reusing` 1 次）
+- `CLIState` 只剩 `compact` 一个字段，收尾改为调管理层的 `shutdown_all()`
+- 两个入口层模块都不再 import `browser_manager`
+
+顺带补上了一个原本缺失的行为：**stdio 与 HTTP 服务此前从不释放浏览器**，只能等进程退出被系统回收。现在 stdio 的 `finally` 和 HTTP 的 lifespan 都会调用 `ToolHandlers.shutdown()` —— 自己启动的实例会被关闭，接管来的只断开连接。
+
+`tests/test_layering.py` 用 AST 检查把这条边界固定下来：入口层模块不得 import 浏览器层、不得出现 `BrowserManager(`、`ToolHandlers` / `CLIState` 的实例属性里不得有浏览器对象。

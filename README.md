@@ -223,7 +223,7 @@ xhs-mcp mcp [--mode stdio|http] [--port 3000]
 浏览器层      BrowserManager → CloakBrowser + Playwright
 ```
 
-入口层永远不自己启动浏览器，只向实例管理层要。管理层按 profile 目录归一：
+入口层**只持有 service**，不持有任何浏览器对象，也不自己启动浏览器；需要收尾时调用管理层的 `shutdown_all()`，而不是去 service 内部翻它用的浏览器。管理层按 profile 目录归一：
 
 - **进程内**：同一 profile 复用同一实例（引用计数），多 tab 并行
 - **跨进程**：浏览器启动时 Chromium 会把调试端口写入 profile 目录的 `DevToolsActivePort`；后来的进程读到它就**接管已有实例**，而不是再启一个然后失败

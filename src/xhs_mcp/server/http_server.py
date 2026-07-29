@@ -108,7 +108,10 @@ class XHSHTTPMCPServer:
         @contextlib.asynccontextmanager
         async def lifespan(_app: Starlette) -> AsyncIterator[None]:
             async with self._session_manager.run():
-                yield
+                try:
+                    yield
+                finally:
+                    await self.tool_handlers.shutdown()
 
         return Starlette(
             routes=[

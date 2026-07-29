@@ -116,9 +116,14 @@ class XHSMCPServer:
         from handlers or the browser subprocess cannot corrupt the JSON-RPC
         stream on stdout.
         """
-        async with stdio_server() as (read_stream, write_stream):
-            await self.server.run(
-                read_stream,
-                write_stream,
-                self.server.create_initialization_options(),
-            )
+        try:
+            async with stdio_server() as (read_stream, write_stream):
+                await self.server.run(
+                    read_stream,
+                    write_stream,
+                    self.server.create_initialization_options(),
+                )
+        finally:
+            # Hand the browser instance back so an owned browser is closed
+            # rather than left behind for the OS to reap.
+            await self.tool_handlers.shutdown()
